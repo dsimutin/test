@@ -13,6 +13,7 @@ from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
 from .config import Config, load_config
+from .middlewares import EnsureUserMiddleware
 from .handlers import quiz as quiz_router
 from .handlers import start as start_router
 from .handlers import stats as stats_router
@@ -65,6 +66,10 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
     dp["cfg"] = cfg
+
+    # Register every user on first interaction, even if they skip /start
+    dp.message.outer_middleware(EnsureUserMiddleware())
+    dp.callback_query.outer_middleware(EnsureUserMiddleware())
 
     dp.include_router(start_router.router)
     dp.include_router(teacher_router.router)
