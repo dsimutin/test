@@ -12,14 +12,17 @@ def fetch_vocabulary() -> List[Tuple[str, str, Optional[str]]]:
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
     sheet_name = os.environ.get("SHEET_NAME", "vocabulary")
 
-    # Support credentials either as a JSON string in env var or as a file path
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-    if creds_json:
-        info = json.loads(creds_json)
-        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    # Accept credentials as JSON string (GOOGLE_CREDENTIALS_JSON),
+    # as a file path (GOOGLE_CREDENTIALS_FILE), or auto-detect if the
+    # file variable actually contains JSON content (common Railway mistake).
+    raw = (
+        os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        or os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
+    )
+    if raw.strip().startswith("{"):
+        creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     else:
-        creds_file = os.environ["GOOGLE_CREDENTIALS_FILE"]
-        creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
+        creds = Credentials.from_service_account_file(raw, scopes=SCOPES)
     client = gspread.authorize(creds)
 
     if spreadsheet_id:
