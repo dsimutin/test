@@ -11,9 +11,9 @@ from telegram.ext import (
 )
 
 from database import (
+    get_card_counts,
     get_due_cards,
     get_or_create_progress,
-    get_total_words,
     get_user_stats,
     init_db,
     sync_words,
@@ -28,54 +28,109 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-# ── helpers ──────────────────────────────────────────────────────────────────
+# ── keyboards ─────────────────────────────────────────────────────────────────
 
-def _card_keyboard():
+def _mode_keyboard(counts: dict) -> InlineKeyboardMarkup:
+    words_due = counts.get("word", 0)
+    verbs_due = counts.get("verb", 0)
+    rows = []
+    if words_due:
+        rows.append([InlineKeyboardButton(
+            f"📖 Слова ({words_due} карточек)", callback_data="mode_word"
+        )])
+    if verbs_due:
+        rows.append([InlineKeyboardButton(
+            f"⚡ Неправильные глаголы ({verbs_due} карточек)", callback_data="mode_verb"
+        )])
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(rows)
+
+
+def _card_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("👁 Показать перевод", callback_data="show_answer")]]
+        [[InlineKeyboardButton("👁 Показать ответ", callback_data="show_answer")]]
     )
 
 
-def _rating_keyboard():
-    return InlineKeyboardMarkup(
-        [[
-            InlineKeyboardButton("❌ Снова", callback_data="rate_1"),
-            InlineKeyboardButton("😐 Сложно", callback_data="rate_3"),
-            InlineKeyboardButton("✅ Легко", callback_data="rate_5"),
-        ]]
-    )
+def _rating_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("❌ Снова", callback_data="rate_1"),
+        InlineKeyboardButton("😐 Сложно", callback_data="rate_3"),
+        InlineKeyboardButton("✅ Легко", callback_data="rate_5"),
+    ]])
 
 
-def _build_card_text(english: str, example: str | None) -> str:
-    text = f"🇬🇧 *{english}*"
+# ── card text builders ────────────────────────────────────────────────────────
+
+def _word_card_question(english: str, example: str | None) -> str:
+    text = f"📖 *{english}*"
     if example:
         text += f"\n\n_{example}_"
     return text
 
 
-async def _send_next_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
-    user_id = update.effective_user.id
-    due = get_due_cards(user_id, limit=1)
+def _word_card_answer(english: str, russian: str, example: str | None) -> str:
+    text = f"📖 *{english}*"
+    if example:
+        text += f"\n_{example}_"
+    text += f"\n\n🇷🇺 *{russian}*"
+    return text
 
-    if not due:
-        text = "🎉 На сегодня всё! Все карточки повторены.\nВозвращайся завтра 👋"
-        if edit:
-            await update.callback_query.edit_message_text(text)
-        else:
-            await update.message.reply_text(text)
-        return
 
-    word_id, english, russian, example = due[0]
-    context.user_data.update(
-        {
-            "word_id": word_id,
-            "english": english,
-            "russian": russian,
-            "example": example or "",
-        }
+def _verb_card_question(infinitive: str) -> str:
+    return (
+        f"⚡ *{infinitive}*\n\n"
+        f"Как будет Past Simple и Past Participle?"
     )
 
-    text = _build_card_text(english, example)
+
+def _verb_card_answer(infinitive: str, russian: str, past_simple: str, past_participle: str) -> str:
+    return (
+        f"⚡ *{infinitive}* — {russian}\n\n"
+        f"▸ Past Simple: *{past_simple}*\n"
+        f"▸ Past Participle: *{past_participle}*"
+    )
+
+
+# ── send next card ────────────────────────────────────────────────────────────
+
+async def _send_next_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
+    user_id = update.effective_user.id
+    mode = context.user_data.get("mode", "word")
+
+    due = get_due_cards(user_id, card_type=mode, limit=1)
+
+    if not due:
+        # Try to switch to other mode if it has cards
+        other_mode = "verb" if mode == "word" else "word"
+        other_due = get_due_cards(user_id, card_type=other_mode, limit=1)
+        if other_due:
+            mode_name = "слова" if other_mode == "word" else "неправильные глаголы"
+            text = f"🎉 В этом разделе всё готово на сегодня!\n\nПереключиться на *{mode_name}*? Напиши /study"
+        else:
+            text = "🎉 На сегодня всё! Все карточки повторены.\nВозвращайся завтра 👋"
+        if edit:
+            await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    word_id, english, russian, example, past_simple, past_participle = due[0]
+    context.user_data.update({
+        "word_id": word_id,
+        "english": english,
+        "russian": russian,
+        "example": example or "",
+        "past_simple": past_simple or "",
+        "past_participle": past_participle or "",
+    })
+
+    if mode == "verb":
+        text = _verb_card_question(english)
+    else:
+        text = _word_card_question(english, example)
+
     if edit:
         await update.callback_query.edit_message_text(
             text, reply_markup=_card_keyboard(), parse_mode="Markdown"
@@ -99,26 +154,42 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_study(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await _send_next_card(update, context)
+    user_id = update.effective_user.id
+    counts = get_card_counts(user_id)
+
+    if not counts:
+        await update.message.reply_text(
+            "📭 Карточек пока нет. Сначала загрузи слова командой /sync"
+        )
+        return
+
+    # If only one type available — start immediately
+    if len(counts) == 1:
+        context.user_data["mode"] = next(iter(counts))
+        await _send_next_card(update, context)
+        return
+
+    keyboard = _mode_keyboard(counts)
+    await update.message.reply_text(
+        "Что будем учить сегодня?",
+        reply_markup=keyboard,
+    )
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    s = get_user_stats(user_id)
-    total = get_total_words()
-    due_count = len(get_due_cards(user_id, limit=9999))
+    stats = get_user_stats(user_id)
 
-    lines = [
-        "📊 *Твоя статистика*\n",
-        f"📚 Слов в базе: {total}",
-        f"✅ Изучено слов: {s['learned']}",
-        f"📅 Ждут повторения сегодня: {due_count}",
-        f"🔄 Всего ответов: {s['total_reviews']}",
-        f"🎯 Правильных: {s['correct_reviews']}",
-    ]
-    if s["total_reviews"]:
-        pct = round(s["correct_reviews"] / s["total_reviews"] * 100)
-        lines.append(f"💯 Точность: {pct}%")
+    lines = ["📊 *Твоя статистика*\n"]
+
+    for card_type, s in stats.items():
+        label = "📖 Слова" if card_type == "word" else "⚡ Неправильные глаголы"
+        pct = ""
+        if s["total_reviews"]:
+            pct = f" (точность {round(s['correct_reviews'] / s['total_reviews'] * 100)}%)"
+        lines.append(
+            f"{label}: выучено {s['learned']}/{s['total']}{pct}"
+        )
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -128,8 +199,12 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         words = fetch_vocabulary()
         new = sync_words(words)
+        word_count = sum(1 for w in words if w[3] == "word")
+        verb_count = sum(1 for w in words if w[3] == "verb")
         await msg.edit_text(
-            f"✅ Готово! Добавлено новых слов: *{new}* (всего в таблице: {len(words)})",
+            f"✅ Готово! Добавлено новых карточек: *{new}*\n"
+            f"📖 Слов в таблице: {word_count}\n"
+            f"⚡ Неправильных глаголов: {verb_count}",
             parse_mode="Markdown",
         )
     except Exception as exc:
@@ -145,13 +220,22 @@ async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     data = query.data
 
-    if data == "show_answer":
+    if data.startswith("mode_"):
+        context.user_data["mode"] = data[5:]  # "word" or "verb"
+        await _send_next_card(update, context, edit=True)
+
+    elif data == "show_answer":
+        mode = context.user_data.get("mode", "word")
         english = context.user_data.get("english", "")
         russian = context.user_data.get("russian", "")
         example = context.user_data.get("example", "")
+        past_simple = context.user_data.get("past_simple", "")
+        past_participle = context.user_data.get("past_participle", "")
 
-        text = _build_card_text(english, example)
-        text += f"\n\n🇷🇺 *{russian}*"
+        if mode == "verb":
+            text = _verb_card_answer(english, russian, past_simple, past_participle)
+        else:
+            text = _word_card_answer(english, russian, example)
 
         await query.edit_message_text(
             text, reply_markup=_rating_keyboard(), parse_mode="Markdown"

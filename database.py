@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 
 DB_PATH = os.environ.get("DB_PATH", "flashcards.db")
 
+LEARNED_THRESHOLD = 5  # correct answers to consider a card "learned"
+
 
 def _conn():
     return sqlite3.connect(DB_PATH)
@@ -19,11 +21,27 @@ def init_db():
     c.execute("""
         CREATE TABLE IF NOT EXISTS words (
             id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            english TEXT    NOT NULL UNIQUE,
+            english TEXT    NOT NULL,
             russian TEXT    NOT NULL,
-            example TEXT
+            example TEXT,
+            card_type TEXT  NOT NULL DEFAULT 'word'
         )
     """)
+    # For irregular verbs: english=infinitive, russian=translation,
+    # past_simple and past_participle stored in extra columns
+    c.execute("PRAGMA table_info(words)")
+    cols = {row[1] for row in c.fetchall()}
+    if "past_simple" not in cols:
+        c.execute("ALTER TABLE words ADD COLUMN past_simple TEXT")
+    if "past_participle" not in cols:
+        c.execute("ALTER TABLE words ADD COLUMN past_participle TEXT")
+
+    # Unique index: (english, card_type)
+    c.execute("""
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_words_unique
+        ON words(english, card_type)
+    """)
+
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_progress (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -43,14 +61,30 @@ def init_db():
     conn.close()
 
 
-def sync_words(words: List[Tuple[str, str, Optional[str]]]) -> int:
+def sync_words(words: List[Tuple]) -> int:
+    """
+    Each item: (english, russian, example, card_type, past_simple, past_participle)
+    card_type: 'word' | 'verb'
+    """
     conn = _conn()
     c = conn.cursor()
     new_count = 0
-    for english, russian, example in words:
+    for row in words:
+        english, russian, example, card_type, past_simple, past_participle = row
         c.execute(
-            "INSERT OR IGNORE INTO words (english, russian, example) VALUES (?, ?, ?)",
-            (english.strip(), russian.strip(), example.strip() if example else None),
+            """
+            INSERT OR IGNORE INTO words
+                (english, russian, example, card_type, past_simple, past_participle)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                english.strip(),
+                russian.strip(),
+                example.strip() if example else None,
+                card_type,
+                past_simple.strip() if past_simple else None,
+                past_participle.strip() if past_participle else None,
+            ),
         )
         if c.rowcount:
             new_count += 1
@@ -59,20 +93,24 @@ def sync_words(words: List[Tuple[str, str, Optional[str]]]) -> int:
     return new_count
 
 
-def get_due_cards(user_id: int, limit: int = 10) -> List[Tuple]:
+def get_due_cards(user_id: int, card_type: str, limit: int = 1) -> List[Tuple]:
     today = date.today().isoformat()
     conn = _conn()
     c = conn.cursor()
     c.execute(
         """
-        SELECT w.id, w.english, w.russian, w.example
+        SELECT w.id, w.english, w.russian, w.example, w.past_simple, w.past_participle
         FROM words w
         LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
-        WHERE up.id IS NULL OR up.next_review <= ?
+        WHERE w.card_type = ?
+          AND (
+              up.id IS NULL
+              OR (up.next_review <= ? AND COALESCE(up.correct_reviews, 0) < ?)
+          )
         ORDER BY COALESCE(up.next_review, '0000-00-00'), RANDOM()
         LIMIT ?
         """,
-        (user_id, today, limit),
+        (user_id, card_type, today, LEARNED_THRESHOLD, limit),
     )
     result = c.fetchall()
     conn.close()
@@ -141,22 +179,46 @@ def get_user_stats(user_id: int) -> Dict:
     c.execute(
         """
         SELECT
-            COUNT(CASE WHEN repetitions > 0 THEN 1 END),
-            COALESCE(SUM(total_reviews), 0),
-            COALESCE(SUM(correct_reviews), 0)
-        FROM user_progress WHERE user_id = ?
+            w.card_type,
+            COUNT(DISTINCT w.id)                                        AS total,
+            COUNT(CASE WHEN COALESCE(up.correct_reviews,0) >= ? THEN 1 END) AS learned,
+            COALESCE(SUM(up.total_reviews), 0),
+            COALESCE(SUM(up.correct_reviews), 0)
+        FROM words w
+        LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
+        GROUP BY w.card_type
         """,
-        (user_id,),
+        (LEARNED_THRESHOLD, user_id),
     )
-    learned, total, correct = c.fetchone()
+    rows = c.fetchall()
     conn.close()
-    return {"learned": learned or 0, "total_reviews": total, "correct_reviews": correct}
+    result = {}
+    for card_type, total, learned, total_reviews, correct_reviews in rows:
+        result[card_type] = {
+            "total": total,
+            "learned": learned,
+            "total_reviews": total_reviews,
+            "correct_reviews": correct_reviews,
+        }
+    return result
 
 
-def get_total_words() -> int:
+def get_card_counts(user_id: int) -> Dict:
+    """Returns due count per card_type for today."""
+    today = date.today().isoformat()
     conn = _conn()
     c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM words")
-    count = c.fetchone()[0]
+    c.execute(
+        """
+        SELECT w.card_type, COUNT(*)
+        FROM words w
+        LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
+        WHERE up.id IS NULL
+           OR (up.next_review <= ? AND COALESCE(up.correct_reviews, 0) < ?)
+        GROUP BY w.card_type
+        """,
+        (user_id, today, LEARNED_THRESHOLD),
+    )
+    rows = c.fetchall()
     conn.close()
-    return count
+    return {card_type: count for card_type, count in rows}
