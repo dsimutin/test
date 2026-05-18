@@ -1,8 +1,9 @@
+import os
 import sqlite3
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
-DB_PATH = "flashcards.db"
+DB_PATH = os.environ.get("DB_PATH", "flashcards.db")
 
 
 def _conn():
