@@ -111,11 +111,11 @@ CREATE INDEX IF NOT EXISTS idx_assignments_user
 -- Tiny mirror of the _students sheet (so selection logic can ask
 -- "is multi-tenant mode active?" without round-tripping to Google).
 CREATE TABLE IF NOT EXISTS students_config (
-    telegram_id     INTEGER PRIMARY KEY,
-    name            TEXT,
-    spreadsheet_id  TEXT,
-    active_lessons  TEXT,
-    updated_at      TEXT NOT NULL
+    telegram_id  INTEGER PRIMARY KEY,
+    name         TEXT,
+    words_tabs   TEXT,
+    verbs_tabs   TEXT,
+    updated_at   TEXT NOT NULL
 );
 """
 
@@ -539,7 +539,7 @@ async def student_detail(telegram_id: int) -> dict | None:
 # ── multi-tenant: students_config + student_assignments ──────────────────
 
 async def replace_students_config(rows: list[dict]) -> None:
-    """rows: [{telegram_id, name, spreadsheet_id, active_lessons}, ...]"""
+    """rows: [{telegram_id, name, words_tabs:list, verbs_tabs:list}, ...]"""
     from datetime import datetime
     now = datetime.utcnow().isoformat()
     async with connect() as conn:
@@ -547,12 +547,11 @@ async def replace_students_config(rows: list[dict]) -> None:
         if rows:
             await conn.executemany(
                 """INSERT INTO students_config
-                       (telegram_id, name, spreadsheet_id,
-                        active_lessons, updated_at)
+                       (telegram_id, name, words_tabs, verbs_tabs, updated_at)
                    VALUES (?, ?, ?, ?, ?)""",
                 [(r["telegram_id"], r.get("name") or "",
-                  r.get("spreadsheet_id") or "",
-                  r.get("active_lessons") or "*",
+                  ",".join(r.get("words_tabs") or []),
+                  ",".join(r.get("verbs_tabs") or []),
                   now) for r in rows],
             )
         await conn.commit()
@@ -561,12 +560,12 @@ async def replace_students_config(rows: list[dict]) -> None:
 async def list_students_config() -> list[dict]:
     async with connect() as conn:
         cur = await conn.execute(
-            "SELECT telegram_id, name, spreadsheet_id, active_lessons "
+            "SELECT telegram_id, name, words_tabs, verbs_tabs "
             "FROM students_config"
         )
         return [
             {"telegram_id": r[0], "name": r[1],
-             "spreadsheet_id": r[2], "active_lessons": r[3]}
+             "words_tabs": r[2], "verbs_tabs": r[3]}
             for r in await cur.fetchall()
         ]
 

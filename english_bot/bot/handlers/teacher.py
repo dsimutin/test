@@ -247,25 +247,22 @@ async def cmd_assignments(msg: types.Message, cfg: Config) -> None:
     rows = await db.list_students_config()
     if not rows:
         await msg.answer(
-            "Лист <code>_students</code> пуст — все ученики видят "
-            "слова из главной таблицы (single-tenant режим).\n\n"
-            "Чтобы дать персональные слова — добавь в "
-            "<code>_students</code>:\n"
-            "<code>telegram_id | name | spreadsheet_id | active_lessons</code>"
+            "Лист <code>_students</code> пуст. Как только ученик напишет "
+            "боту — он там появится автоматически."
         )
         return
     lines = ["📋 <b>Назначения учеников</b>\n"]
     for r in rows:
         word_ids = await db.get_assigned_ids(r["telegram_id"], "word")
         verb_ids = await db.get_assigned_ids(r["telegram_id"], "verb")
-        src = r["spreadsheet_id"] or "<i>главная таблица</i>"
-        src_short = (src[:18] + "…") if len(src) > 20 else src
+        wt = r["words_tabs"] or "<i>дефолт</i>"
+        vt = r["verbs_tabs"] or "<i>дефолт</i>"
         lines.append(
             f"<b>{html.escape(r['name'] or '—')}</b>  "
             f"<code>{r['telegram_id']}</code>\n"
-            f"  Источник: {src_short}\n"
-            f"  Уроки: <code>{html.escape(r['active_lessons'])}</code>\n"
-            f"  📚 {len(word_ids)} слов · ⚡ {len(verb_ids)} глаголов\n"
+            f"  📚 Слова: {html.escape(wt) if r['words_tabs'] else wt}\n"
+            f"  ⚡ Глаголы: {html.escape(vt) if r['verbs_tabs'] else vt}\n"
+            f"  ({len(word_ids)} слов · {len(verb_ids)} глаголов)\n"
         )
     await msg.answer("\n".join(lines))
 

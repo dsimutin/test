@@ -57,7 +57,7 @@ SKIP_SHEET_KEYWORDS = (
 SYSTEM_SHEET_PREFIX = "_"  # snapshot / config sheets
 
 STUDENTS_SHEET = "_students"
-STUDENTS_HEADER = ["telegram_id", "name", "spreadsheet_id", "active_lessons"]
+STUDENTS_HEADER = ["telegram_id", "name", "words_tabs", "verbs_tabs"]
 
 DEFAULT_ACCENTS = [
     "#2F7D5B", "#2F6FD6", "#7A4FB3", "#C44B6A", "#D97A2A", "#1A7A8A",
@@ -234,6 +234,10 @@ def _get_or_create_students_ws(ss):
         return ws
 
 
+def _split_tabs(raw: str) -> list[str]:
+    return [t.strip() for t in (raw or "").split(",") if t.strip()]
+
+
 def _read_students_rows(ws) -> list[dict]:
     try:
         records = ws.get_all_records(expected_headers=STUDENTS_HEADER)
@@ -247,8 +251,8 @@ def _read_students_rows(ws) -> list[dict]:
         rows.append({
             "telegram_id": int(tid),
             "name": str(r.get("name") or "").strip(),
-            "spreadsheet_id": str(r.get("spreadsheet_id") or "").strip(),
-            "active_lessons": str(r.get("active_lessons") or "").strip() or "*",
+            "words_tabs": _split_tabs(str(r.get("words_tabs") or "")),
+            "verbs_tabs": _split_tabs(str(r.get("verbs_tabs") or "")),
         })
     return rows
 
@@ -272,10 +276,10 @@ def _ensure_students_sheet(ss, known_users: list[tuple]) -> list[dict]:
         if tid in existing:
             continue
         display = first_name or (f"@{username}" if username else f"id {tid}")
-        new_rows.append([tid, display, "", "*"])
+        new_rows.append([tid, display, "", ""])
         rows.append({
             "telegram_id": tid, "name": display,
-            "spreadsheet_id": "", "active_lessons": "*",
+            "words_tabs": [], "verbs_tabs": [],
         })
         existing.add(tid)
 
@@ -298,7 +302,7 @@ def append_student_row(cfg: Config, telegram_id: int,
         existing = {r["telegram_id"] for r in _read_students_rows(ws)}
         if telegram_id in existing:
             return
-        ws.append_row([telegram_id, name, "", "*"],
+        ws.append_row([telegram_id, name, "", ""],
                       value_input_option="RAW")
         logger.info("New student %s (%s) added to %s",
                     telegram_id, name, STUDENTS_SHEET)
@@ -307,18 +311,45 @@ def append_student_row(cfg: Config, telegram_id: int,
                        telegram_id, STUDENTS_SHEET, e)
 
 
-def _lessons_match(item_lesson, item_level: str, active: str) -> bool:
-    """Decide if item with given lesson/level passes the active filter."""
-    active = active.strip()
-    if not active or active == "*":
-        return True
-    tokens = [t.strip().lower() for t in active.split(",") if t.strip()]
-    candidates = {str(item_lesson).strip().lower(),
-                  str(item_level or "").strip().lower()}
-    return any(t in candidates for t in tokens)
-
-
 # ── orchestrator (blocking) ──────────────────────────────────────────────
+
+def _read_tab_records(ws_by_title: dict, tab_name: str) -> list[dict]:
+    ws = ws_by_title.get(_norm(tab_name))
+    if ws is None:
+        logger.warning("Tab «%s» not found", tab_name)
+        return []
+    try:
+        return ws.get_all_records()
+    except Exception as e:
+        logger.warning("Tab «%s» read error: %s", tab_name, e)
+        return []
+
+
+def _default_vocab_tabs(ws_by_title: dict) -> list[str]:
+    """Return the first matching default vocab tab title."""
+    for cand in VOCAB_SHEET_NAMES:
+        if cand in ws_by_title:
+            return [ws_by_title[cand].title]
+    # fall back: any tab classified as vocab (excluding system sheets)
+    for ws in ws_by_title.values():
+        rows = ws.get_all_values()
+        header = rows[0] if rows else []
+        if _classify(ws.title, header) == "vocab":
+            return [ws.title]
+    return []
+
+
+def _default_verb_tabs(ws_by_title: dict) -> list[str]:
+    for cand in VERB_SHEET_NAMES:
+        if cand in ws_by_title:
+            return [ws_by_title[cand].title]
+    for ws in ws_by_title.values():
+        rows = ws.get_all_values()
+        header = rows[0] if rows else []
+        if _classify(ws.title, header) == "verb":
+            return [ws.title]
+    return []
+
 
 def _sync_blocking(cfg: Config, known_users: list[tuple]) -> dict:
     """Returns summary stats. Heavy work — runs in a thread."""
@@ -327,57 +358,71 @@ def _sync_blocking(cfg: Config, known_users: list[tuple]) -> dict:
 
     student_rows = _ensure_students_sheet(main_ss, known_users)
 
-    # Always also read the main spreadsheet (default content pool)
-    main_vocab, main_verbs = _read_spreadsheet(client, cfg.spreadsheet_id)
+    # Build tab index: lower-cased title → worksheet
+    ws_by_title = {_norm(ws.title): ws for ws in main_ss.worksheets()}
 
-    # Cache per-spreadsheet reads so two students sharing a source only
-    # cost one API round-trip
-    source_cache: dict[str, tuple[list[dict], list[dict]]] = {
-        cfg.spreadsheet_id: (main_vocab, main_verbs),
-    }
+    # Detect default tabs (used when student row has empty words_tabs / verbs_tabs)
+    default_vocab_tabs = _default_vocab_tabs(ws_by_title)
+    default_verb_tabs  = _default_verb_tabs(ws_by_title)
+    logger.info("Default vocab tabs: %s, verb tabs: %s",
+                default_vocab_tabs, default_verb_tabs)
+
+    # Cache per-tab parsed content (one parse per tab, even if 10 students share it)
+    vocab_cache: dict[str, list[VocabularyItem]] = {}
+    verb_cache:  dict[str, list[VerbItem]] = {}
+
+    def _vocab_for(tab: str) -> list[VocabularyItem]:
+        key = _norm(tab)
+        if key not in vocab_cache:
+            vocab_cache[key] = _parse_vocabulary(
+                _read_tab_records(ws_by_title, tab)
+            )
+        return vocab_cache[key]
+
+    def _verbs_for(tab: str) -> list[VerbItem]:
+        key = _norm(tab)
+        if key not in verb_cache:
+            verb_cache[key] = _parse_verbs(
+                _read_tab_records(ws_by_title, tab)
+            )
+        return verb_cache[key]
 
     all_vocab: dict[str, VocabularyItem] = {}
     all_verbs: dict[str, VerbItem] = {}
 
-    # Always upsert main content (so single-tenant mode still works)
-    for it in _parse_vocabulary(main_vocab):
-        all_vocab[it.id] = it
-    for it in _parse_verbs(main_verbs):
-        all_verbs[it.id] = it
+    # Always preload defaults (so single-tenant fallback and brand-new
+    # students who haven't run sync yet still have content)
+    for tab in default_vocab_tabs:
+        for it in _vocab_for(tab):
+            all_vocab[it.id] = it
+    for tab in default_verb_tabs:
+        for it in _verbs_for(tab):
+            all_verbs[it.id] = it
 
-    # Per-student assignments
     student_assignments: dict[int, dict[str, list[str]]] = {}
 
     for s in student_rows:
-        source_id = s["spreadsheet_id"] or cfg.spreadsheet_id
-        if source_id not in source_cache:
-            try:
-                source_cache[source_id] = _read_spreadsheet(client, source_id)
-            except Exception as e:
-                logger.warning("Cannot open spreadsheet %s for %s: %s",
-                               source_id, s.get("name"), e)
-                continue
-        v_recs, vb_recs = source_cache[source_id]
-        v_items = _parse_vocabulary(v_recs)
-        vb_items = _parse_verbs(vb_recs)
+        w_tabs = s["words_tabs"] or default_vocab_tabs
+        v_tabs = s["verbs_tabs"] or default_verb_tabs
 
-        # filter by active_lessons
-        active = s["active_lessons"]
-        vocab_ids = [
-            it.id for it in v_items
-            if _lessons_match(it.lesson, it.level, active)
-        ]
-        verb_ids = [
-            it.id for it in vb_items
-            if _lessons_match(it.lesson, "", active)
-        ]
-        for it in v_items:
-            all_vocab[it.id] = it
-        for it in vb_items:
-            all_verbs[it.id] = it
+        word_ids: list[str] = []
+        for tab in w_tabs:
+            items = _vocab_for(tab)
+            for it in items:
+                all_vocab[it.id] = it
+            word_ids.extend(it.id for it in items)
+
+        verb_ids: list[str] = []
+        for tab in v_tabs:
+            items = _verbs_for(tab)
+            for it in items:
+                all_verbs[it.id] = it
+            verb_ids.extend(it.id for it in items)
+
+        # de-dup preserving order
         student_assignments[s["telegram_id"]] = {
-            "word": vocab_ids,
-            "verb": verb_ids,
+            "word": list(dict.fromkeys(word_ids)),
+            "verb": list(dict.fromkeys(verb_ids)),
         }
 
     return {
