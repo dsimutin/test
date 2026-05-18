@@ -31,6 +31,7 @@ from database import (
     sync_words,
     update_progress,
 )
+from card_renderer import render_verb_card, render_word_card
 from sheets import fetch_vocabulary, get_sheets_info, write_learned_word
 from spaced_repetition import next_review_date, sm2
 
@@ -193,20 +194,21 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: b
         "past_participle":past_participle or "",
     })
 
-    text = (
-        _word_card_text(english, russian, transcription, example)
-        if mode == "word"
-        else _verb_card_text(english, russian, past_simple, past_participle)
-    )
-
-    if edit:
-        await update.callback_query.edit_message_text(
-            text, reply_markup=_card_keyboard(), parse_mode="HTML"
-        )
+    if mode == "word":
+        image = render_word_card(english, russian, transcription or "", example or "")
     else:
-        await update.message.reply_text(
-            text, reply_markup=_card_keyboard(), parse_mode="HTML"
-        )
+        image = render_verb_card(english, russian, past_simple or "", past_participle or "")
+
+    kb = _card_keyboard()
+    if edit:
+        # Can't edit a photo message easily — delete old and send new
+        try:
+            await update.callback_query.message.delete()
+        except Exception:
+            pass
+        await update.effective_chat.send_photo(photo=image, reply_markup=kb)
+    else:
+        await update.message.reply_photo(photo=image, reply_markup=kb)
 
 
 async def _offer_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
