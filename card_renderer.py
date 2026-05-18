@@ -1,37 +1,46 @@
 """Renders flashcard images using Pillow."""
 import io
+import logging
 import os
+import urllib.request
 
 from PIL import Image, ImageDraw, ImageFont
 
+logger = logging.getLogger(__name__)
+
 FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-_FONT_FILE = os.path.join(FONTS_DIR, "Inter.ttf")
+_REGULAR = os.path.join(FONTS_DIR, "NotoSans-Regular.ttf")
+_BOLD    = os.path.join(FONTS_DIR, "NotoSans-Bold.ttf")
+
+_NOTO_REGULAR_URL = (
+    "https://github.com/googlefonts/noto-fonts/raw/main/"
+    "hinted/ttf/NotoSans/NotoSans-Regular.ttf"
+)
+_NOTO_BOLD_URL = (
+    "https://github.com/googlefonts/noto-fonts/raw/main/"
+    "hinted/ttf/NotoSans/NotoSans-Bold.ttf"
+)
+
+
+def _ensure_fonts():
+    os.makedirs(FONTS_DIR, exist_ok=True)
+    for path, url in [(_REGULAR, _NOTO_REGULAR_URL), (_BOLD, _NOTO_BOLD_URL)]:
+        if not os.path.exists(path):
+            logger.info("Downloading font: %s", url)
+            try:
+                urllib.request.urlretrieve(url, path)
+            except Exception as e:
+                logger.warning("Font download failed: %s", e)
 
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    candidates = []
-    if bold:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-            "/Library/Fonts/Arial Bold.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-        ]
-    else:
-        candidates = [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/truetype/freefont/FreeSans.ttf",
-            "/Library/Fonts/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-        ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except Exception:
-                continue
+    _ensure_fonts()
+    path = _BOLD if bold else _REGULAR
+    if os.path.exists(path):
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            pass
     return ImageFont.load_default()
 
 
