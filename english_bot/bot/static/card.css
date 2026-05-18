@@ -1,0 +1,176 @@
+/* Premium minimal flashcard
+   Canvas: 1080×1350 (4:5). Card fills entire canvas — no outer letterbox. */
+
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+  width: 1080px;
+  height: 1350px;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background: #FFFFFF;
+  color: #0F172A;
+  -webkit-font-smoothing: antialiased;
+}
+
+.flashcard {
+  width: 1080px;
+  height: 1350px;
+  padding: 80px 80px 70px;
+  background: #FFFFFF;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, .04),
+              0 30px 90px rgba(15, 23, 42, .08);
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Accent stripe at top */
+.flashcard::before {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 12px;
+  background: var(--accent, #2F7D5B);
+}
+
+/* ── Header row ─────────────────────────────────────────── */
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 70px;
+}
+.label {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: .28em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+.number {
+  font-size: 26px;
+  font-weight: 800;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, #fff);
+  padding: 10px 22px;
+  border-radius: 18px;
+  letter-spacing: .04em;
+}
+
+/* ── Word section ───────────────────────────────────────── */
+.word-block { margin-bottom: 50px; }
+.word {
+  font-size: 168px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -.04em;
+  color: #0F172A;
+}
+.accent-line {
+  width: 140px;
+  height: 6px;
+  background: var(--accent);
+  border-radius: 3px;
+  margin: 36px 0 28px;
+}
+.transcription {
+  font-size: 60px;
+  font-weight: 500;
+  color: color-mix(in srgb, var(--accent) 80%, #444);
+  letter-spacing: -.01em;
+}
+
+/* ── Translation ───────────────────────────────────────── */
+.translation-block { margin-top: auto; padding-top: 30px; }
+.translation-label {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: .28em;
+  text-transform: uppercase;
+  color: color-mix(in srgb, var(--accent) 60%, #94A3B8);
+  margin-bottom: 18px;
+}
+.translation {
+  font-size: 84px;
+  font-weight: 800;
+  color: #1E293B;
+  letter-spacing: -.02em;
+  line-height: 1.05;
+}
+
+/* ── Example ────────────────────────────────────────────── */
+.example {
+  margin-top: 50px;
+  padding: 38px 44px;
+  background: color-mix(in srgb, var(--accent) 8%, #fff);
+  border-radius: 28px;
+  font-size: 46px;
+  line-height: 1.4;
+  color: #475569;
+  font-weight: 500;
+}
+.example .quote {
+  font-family: Georgia, serif;
+  font-size: 64px;
+  color: var(--accent);
+  opacity: .35;
+  margin-right: 8px;
+  vertical-align: -8px;
+  line-height: 0;
+}
+.example .hl {
+  color: var(--accent);
+  font-weight: 800;
+}
+
+/* ── Verb forms ─────────────────────────────────────────── */
+.verb-forms {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 22px;
+  margin-bottom: 30px;
+}
+.verb-cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+.verb-box {
+  width: 100%;
+  padding: 50px 16px;
+  border-radius: 32px;
+  background: #F4F6FA;
+  text-align: center;
+  font-size: 76px;
+  font-weight: 900;
+  line-height: 1;
+  color: #0F172A;
+  letter-spacing: -.02em;
+}
+.verb-box.accent {
+  background: color-mix(in srgb, var(--accent) 14%, #fff);
+  color: var(--accent);
+}
+.verb-label {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  color: #94A3B8;
+}
+.verb-dots {
+  display: flex;
+  align-items: center;
+  padding: 0 12%;
+  margin: 8px 0 40px;
+}
+.verb-dots .dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent);
+}
+.verb-dots .line {
+  flex: 1; height: 3px;
+  background: color-mix(in srgb, var(--accent) 28%, #fff);
+}

@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
+<style>{{ css }}</style>
+</head>
+<body>
+<div class="flashcard vocabulary-card" style="--accent: {{ accent }}">
+  <div class="card-header">
+    <div class="label">Vocabulary</div>
+    <div class="number">{{ number }}</div>
+  </div>
+
+  <div class="word-block">
+    <div class="word">{{ word }}</div>
+    <div class="accent-line"></div>
+    {% if transcription %}<div class="transcription">{{ transcription }}</div>{% endif %}
+  </div>
+
+  <div class="translation-block">
+    <div class="translation-label">Перевод</div>
+    <div class="translation">{{ translation }}</div>
+  </div>
+
+  {% if example %}
+  <div class="example">
+    <span class="quote">"</span>{{ example_html | safe }}
+  </div>
+  {% endif %}
+</div>
+</body>
+</html>
