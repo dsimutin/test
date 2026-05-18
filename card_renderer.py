@@ -1,16 +1,10 @@
 """
-Renders flashcards by screenshotting the exact same HTML used in the web preview.
-Uses Playwright (Chromium) so the output is pixel-perfect identical to the browser.
-Falls back to Pillow if Playwright is not available.
+Renders flashcards with Pillow. Draws directly from structured data.
 """
 import io
-import logging
 import os
-import re
+from PIL import Image, ImageDraw, ImageFont
 
-logger = logging.getLogger(__name__)
-
-# Accent colour palette — cycles by word_id
 ACCENT_PALETTE = [
     "#2F7D5B",  # green
     "#2F6FD6",  # blue
@@ -20,259 +14,232 @@ ACCENT_PALETTE = [
     "#1A7A8A",  # teal
 ]
 
+FONT_DIR = os.path.join(os.path.dirname(__file__), "fonts")
+
+# Card dimensions
+CW = 600   # card width
+PAD = 44   # horizontal padding inside card
+INNER = CW - PAD * 2
+
+
 def pick_accent(word_id: int) -> str:
     return ACCENT_PALETTE[word_id % len(ACCENT_PALETTE)]
 
 
-# ── HTML card templates ────────────────────────────────────────────────────────
-
-_HEAD = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="UTF-8"/>
-<link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet"/>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{
-  font-family:'Inter',system-ui,sans-serif;
-  background:#F0EDE8;
-  padding:32px;
-  display:inline-block;
-}
-.card{
-  width:480px;
-  background:#fff;
-  border-radius:32px;
-  padding:36px;
-  box-shadow:0 2px 4px rgba(15,23,42,.05),0 16px 40px rgba(15,23,42,.13);
-  display:flex;
-  flex-direction:column;
-  gap:0;
-  position:relative;
-  overflow:hidden;
-}
-.card::before{
-  content:'';
-  position:absolute;
-  inset:0 0 auto 0;
-  height:5px;
-  border-radius:32px 32px 0 0;
-  background:ACCENT;
-}
-.header{
-  display:flex;align-items:center;justify-content:space-between;
-  margin-bottom:26px;
-}
-.label{
-  display:flex;align-items:center;gap:8px;
-  font-size:11px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;
-  color:ACCENT;
-}
-.label-icon{
-  width:28px;height:28px;border-radius:50%;
-  background:ACCENT18;
-  display:flex;align-items:center;justify-content:center;
-  font-size:13px;font-weight:900;color:ACCENT;
-}
-.number{
-  font-size:13px;font-weight:700;
-  padding:5px 13px;border-radius:10px;
-  background:ACCENT12;color:ACCENT;
-}
-.word{
-  font-size:58px;font-weight:800;color:#0F172A;
-  letter-spacing:-.04em;line-height:1;
-  margin-bottom:14px;
-}
-.accent-line{
-  height:2px;border-radius:2px;
-  background:ACCENT50;
-  margin-bottom:14px;
-}
-.transcription{
-  font-size:26px;font-weight:500;color:ACCENT;
-}
-.sep{
-  height:1px;background:#E8ECF0;
-  margin:20px 0;
-}
-.translation-lbl{
-  font-size:12px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;
-  color:ACCENT60;margin-bottom:8px;
-}
-.translation{
-  font-size:30px;font-weight:700;color:#1E293B;line-height:1.25;
-}
-.example-box{
-  margin-top:20px;
-  padding:16px 20px;
-  border-radius:20px;
-  background:ACCENT08;
-  font-size:20px;line-height:1.6;color:#475569;
-}
-.example-box .q{
-  font-family:Georgia,serif;font-size:26px;opacity:.3;
-  margin-right:3px;vertical-align:-.1em;
-}
-.example-box .hl{color:ACCENT;font-weight:700;}
-/* verb forms */
-.forms{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:14px;}
-.form-cell{display:flex;flex-direction:column;align-items:center;gap:8px;}
-.form-box{
-  width:100%;padding:16px 8px;border-radius:18px;
-  background:#F7F9FC;text-align:center;
-  font-size:30px;font-weight:800;color:#0F172A;line-height:1;
-}
-.form-box.acc{background:ACCENT12;color:ACCENT;}
-.form-lbl{
-  font-size:10px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;
-  color:#94A3B8;
-}
-.dots{display:flex;align-items:center;padding:0 12%;margin-bottom:4px;}
-.dot{width:9px;height:9px;border-radius:50%;background:ACCENT;flex-shrink:0;}
-.dot-line{flex:1;height:1px;background:#E2E8F0;}
-</style>
-</head>
-<body>
-"""
-
-def _css(tmpl: str, accent: str) -> str:
-    """Replace ACCENT placeholders with actual colour and its tints."""
-    r, g, b = int(accent[1:3],16), int(accent[3:5],16), int(accent[5:7],16)
-    def tint(a):
-        return f"rgb({int(255*(1-a)+r*a)},{int(255*(1-a)+g*a)},{int(255*(1-a)+b*a)})"
-    return (tmpl
-        .replace("ACCENT60", tint(.60))
-        .replace("ACCENT50", tint(.45))
-        .replace("ACCENT18", tint(.12))
-        .replace("ACCENT12", tint(.10))
-        .replace("ACCENT08", tint(.07))
-        .replace("ACCENT",   accent))
+def _hex(h: str):
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
 
 
-def _hl(text: str, word: str, accent: str) -> str:
-    """Wrap highlight word in <span class=hl>."""
-    return re.sub(
-        rf'(\b{re.escape(word)}\b)',
-        f'<span class="hl">{word}</span>',
-        text, flags=re.IGNORECASE
+def _tint(rgb, a: float):
+    r, g, b = rgb
+    return (
+        int(255 * (1 - a) + r * a),
+        int(255 * (1 - a) + g * a),
+        int(255 * (1 - a) + b * a),
     )
 
 
-def _vocab_html(english, russian, transcription, example, number, accent) -> str:
-    css = _css(_HEAD, accent)
-    hl_ex = _hl(example, english, accent) if example else ""
-    ex_block = (f'<div class="example-box"><span class="q">"</span>{hl_ex}</div>'
-                if example else "")
-    tr_block = (f'<div class="transcription">{transcription}</div>' if transcription else "")
-    return f"""{css}
-<div class="card">
-  <div class="header">
-    <div class="label">
-      <div class="label-icon">📖</div>
-      VOCABULARY
-    </div>
-    <div class="number">{number}</div>
-  </div>
-  <div class="word">{english}</div>
-  <div class="accent-line"></div>
-  {tr_block}
-  <div class="sep"></div>
-  <div class="translation-lbl">ПЕРЕВОД</div>
-  <div class="translation">{russian}</div>
-  {ex_block}
-</div>
-</body></html>"""
-
-
-def _verb_html(infinitive, russian, past_simple, past_participle,
-               example, number, accent) -> str:
-    css = _css(_HEAD, accent)
-    ps  = past_simple      or "—"
-    pp  = past_participle  or "—"
-    hl_ex = _hl(example, past_simple or infinitive, accent) if example else ""
-    ex_block = (f'<div class="example-box"><span class="q">"</span>{hl_ex}</div>'
-                if example else "")
-    return f"""{css}
-<div class="card">
-  <div class="header">
-    <div class="label">
-      <div class="label-icon" style="font-size:16px">↻</div>
-      IRREGULAR VERB
-    </div>
-    <div class="number">{number}</div>
-  </div>
-  <div class="forms">
-    <div class="form-cell">
-      <div class="form-box">{infinitive}</div>
-      <div class="form-lbl">infinitive</div>
-    </div>
-    <div class="form-cell">
-      <div class="form-box acc">{ps}</div>
-      <div class="form-lbl">past simple</div>
-    </div>
-    <div class="form-cell">
-      <div class="form-box">{pp}</div>
-      <div class="form-lbl">participle</div>
-    </div>
-  </div>
-  <div class="dots">
-    <div class="dot"></div><div class="dot-line"></div>
-    <div class="dot"></div><div class="dot-line"></div>
-    <div class="dot"></div>
-  </div>
-  <div class="sep"></div>
-  <div class="translation-lbl">ПЕРЕВОД</div>
-  <div class="translation">{russian}</div>
-  {ex_block}
-</div>
-</body></html>"""
-
-
-# ── Playwright renderer ────────────────────────────────────────────────────────
-
-def _render_html(html: str) -> io.BytesIO:
-    """Screenshot an HTML string with headless Chromium via Playwright."""
-    from playwright.sync_api import sync_playwright
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch()
-        page = browser.new_page(viewport={"width": 600, "height": 900})
-        page.set_content(html, wait_until="networkidle")
-        card = page.query_selector(".card")
-        png = card.screenshot()
-        browser.close()
-    buf = io.BytesIO(png)
-    buf.seek(0)
-    return buf
-
-
-# ── Pillow fallback ────────────────────────────────────────────────────────────
-
-def _pillow_fallback(html: str) -> io.BytesIO:
-    """Ultra-simple Pillow render when Playwright isn't available."""
-    from card_renderer_pillow import render_from_data
-    return render_from_data(html)
-
-
-def _render(html: str) -> io.BytesIO:
+def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    name = "NotoSans-Bold.ttf" if bold else "NotoSans-Regular.ttf"
     try:
-        return _render_html(html)
-    except Exception as e:
-        logger.warning("Playwright failed (%s), using Pillow fallback", e)
-        return _pillow_fallback(html)
+        return ImageFont.truetype(os.path.join(FONT_DIR, name), size)
+    except Exception:
+        return ImageFont.load_default()
 
 
-# ── Public API ─────────────────────────────────────────────────────────────────
+def _text_w(draw, text, font):
+    bb = draw.textbbox((0, 0), text, font=font)
+    return bb[2] - bb[0]
+
+
+def _wrapped_lines(draw, text, font, max_w):
+    words = text.split()
+    lines, cur = [], ""
+    for w in words:
+        trial = (cur + " " + w).strip()
+        if _text_w(draw, trial, font) <= max_w:
+            cur = trial
+        else:
+            if cur:
+                lines.append(cur)
+            cur = w
+    if cur:
+        lines.append(cur)
+    return lines or [""]
+
+
+def _line_h(font):
+    bb = ImageFont.FreeTypeFont.getbbox(font, "Ag")
+    return bb[3] - bb[1]
+
+
+# ── shared card chrome ─────────────────────────────────────────────────────────
+
+def _base_image(height: int, accent_rgb) -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    BG = (240, 237, 232)
+    img = Image.new("RGB", (CW + 64, height + 64), BG)
+    d = ImageDraw.Draw(img, "RGBA")
+
+    # shadow
+    shadow_color = (15, 23, 42, 26)
+    for i in range(18, 0, -1):
+        alpha = int(80 * (i / 18) ** 2)
+        d.rounded_rectangle(
+            [32 - i // 3, 32 + i // 2, CW + 32 + i // 3, height + 32 + i // 2],
+            radius=28, fill=(15, 23, 42, alpha)
+        )
+
+    # card body
+    d.rounded_rectangle([32, 32, CW + 32, height + 32], radius=28, fill=(255, 255, 255))
+
+    # accent stripe
+    d.rounded_rectangle([32, 32, CW + 32, 38], radius=28, fill=accent_rgb)
+    d.rectangle([32, 36, CW + 32, 38], fill=accent_rgb)  # flatten bottom of stripe
+
+    return img, d
+
+
+def _draw_header(d, accent_rgb, label: str, icon: str, number: str, y: int) -> int:
+    """Draw label + number row. Returns new y."""
+    f_label = _font(11, bold=True)
+    f_num   = _font(13, bold=True)
+
+    icon_r = 15
+    ix = 32 + PAD
+    iy = y + 1
+
+    # icon circle
+    icon_color = _tint(accent_rgb, 0.12)
+    d.ellipse([ix, iy, ix + icon_r * 2, iy + icon_r * 2], fill=icon_color)
+    fi = _font(14, bold=True)
+    d.text((ix + icon_r - 6, iy + icon_r - 8), icon, font=fi, fill=accent_rgb)
+
+    # label text
+    d.text((ix + icon_r * 2 + 10, iy + 4), label, font=f_label, fill=accent_rgb)
+
+    # number badge
+    num_w = _text_w(d, number, f_num) + 22
+    nx = 32 + CW - PAD - num_w
+    num_bg = _tint(accent_rgb, 0.10)
+    d.rounded_rectangle([nx, iy + 1, nx + num_w, iy + 26], radius=8, fill=num_bg)
+    d.text((nx + 11, iy + 5), number, font=f_num, fill=accent_rgb)
+
+    return y + icon_r * 2 + 16
+
+
+def _draw_sep(d, y: int) -> int:
+    d.line([(32 + PAD, y + 8), (32 + CW - PAD, y + 8)], fill=(232, 236, 240), width=1)
+    return y + 24
+
+
+# ── vocabulary card ────────────────────────────────────────────────────────────
 
 def render_word_card(english: str, russian: str,
                      transcription: str = "",
                      example: str = "",
                      number: str = "—",
                      accent: str = "#2F7D5B") -> io.BytesIO:
-    html = _vocab_html(english, russian, transcription, example, number, accent)
-    return _render(html)
+    acc = _hex(accent)
 
+    f_word  = _font(52, bold=True)
+    f_tr    = _font(22)
+    f_lbl   = _font(11, bold=True)
+    f_rus   = _font(28, bold=True)
+    f_ex    = _font(18)
+
+    # measure
+    tmp = Image.new("RGB", (CW, 10))
+    d0  = ImageDraw.Draw(tmp)
+
+    word_lines = _wrapped_lines(d0, english, f_word, INNER)
+    rus_lines  = _wrapped_lines(d0, russian,  f_rus,  INNER - 52)
+    ex_lines   = _wrapped_lines(d0, example,  f_ex,   INNER - 32) if example else []
+
+    word_h = sum(_line_h(f_word) + 6 for _ in word_lines) + 4
+    rus_h  = sum(_line_h(f_rus) + 6 for _ in rus_lines)
+    ex_h   = (sum(_line_h(f_ex) + 5 for _ in ex_lines) + 28) if ex_lines else 0
+    tr_h   = (_line_h(f_tr) + 10) if transcription else 0
+
+    height = (
+        24            # top padding after stripe
+        + 32          # header
+        + 18          # gap
+        + word_h
+        + 6           # accent line
+        + tr_h
+        + 28          # sep
+        + 16          # label
+        + rus_h
+        + (20 + ex_h if ex_h else 0)
+        + 36          # bottom padding
+    )
+
+    img, d = _base_image(height, acc)
+    x = 32 + PAD
+    y = 32 + 24
+
+    y = _draw_header(d, acc, "VOCABULARY", "📖", number, y)
+    y += 10
+
+    # word
+    for line in word_lines:
+        d.text((x, y), line, font=f_word, fill=(15, 23, 42))
+        y += _line_h(f_word) + 6
+
+    # accent line
+    y += 2
+    d.rounded_rectangle([x, y, x + INNER, y + 3], radius=2, fill=_tint(acc, 0.45))
+    y += 14
+
+    # transcription
+    if transcription:
+        d.text((x, y), transcription, font=f_tr, fill=acc)
+        y += _line_h(f_tr) + 10
+
+    y = _draw_sep(d, y)
+
+    # translation label
+    d.text((x, y), "ПЕРЕВОД", font=f_lbl, fill=_tint(acc, 0.60))
+    y += _line_h(f_lbl) + 10
+
+    # flag + translation
+    flag_r = 19
+    d.ellipse([x, y, x + flag_r * 2, y + flag_r * 2], fill=_tint(acc, 0.10))
+    d.text((x + flag_r - 9, y + flag_r - 10), "🇷🇺", font=_font(16))
+    tx = x + flag_r * 2 + 10
+    for line in rus_lines:
+        d.text((tx, y + 2), line, font=f_rus, fill=(30, 41, 59))
+        y += _line_h(f_rus) + 6
+    y = max(y, 32 + 24 + height - 36 - ex_h - 20)  # push example to bottom
+
+    # example
+    if ex_lines:
+        y += 16
+        ex_bg = _tint(acc, 0.07)
+        ex_total_h = sum(_line_h(f_ex) + 5 for _ in ex_lines) + 24
+        d.rounded_rectangle([x, y, x + INNER, y + ex_total_h], radius=16, fill=ex_bg)
+        ey = y + 12
+        first = True
+        for line in ex_lines:
+            prefix = "" if not first else ""
+            if first:
+                # draw quote char
+                fq = _font(26)
+                d.text((x + 14, ey - 3), "“", font=fq, fill=(*acc, 80))
+                d.text((x + 30, ey), line, font=f_ex, fill=(71, 85, 105))
+            else:
+                d.text((x + 30, ey), line, font=f_ex, fill=(71, 85, 105))
+            ey += _line_h(f_ex) + 5
+            first = False
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
+
+
+# ── verb card ──────────────────────────────────────────────────────────────────
 
 def render_verb_card(infinitive: str, russian: str,
                      past_simple: str = "",
@@ -280,6 +247,117 @@ def render_verb_card(infinitive: str, russian: str,
                      number: str = "—",
                      accent: str = "#D97A2A",
                      example: str = "") -> io.BytesIO:
-    html = _verb_html(infinitive, russian, past_simple, past_participle,
-                      example, number, accent)
-    return _render(html)
+    acc = _hex(accent)
+    ps  = past_simple      or "—"
+    pp  = past_participle  or "—"
+
+    f_form  = _font(32, bold=True)
+    f_lbl   = _font(10, bold=True)
+    f_rus   = _font(26, bold=True)
+    f_ex    = _font(18)
+    f_tr_lbl = _font(11, bold=True)
+
+    tmp = Image.new("RGB", (CW, 10))
+    d0  = ImageDraw.Draw(tmp)
+
+    cell_w   = (INNER - 20) // 3
+    rus_lines = _wrapped_lines(d0, russian, f_rus, INNER - 52)
+    ex_lines  = _wrapped_lines(d0, example, f_ex, INNER - 32) if example else []
+
+    form_h = 70   # box height
+    rus_h  = sum(_line_h(f_rus) + 6 for _ in rus_lines)
+    ex_h   = (sum(_line_h(f_ex) + 5 for _ in ex_lines) + 28) if ex_lines else 0
+
+    height = (
+        24
+        + 32          # header
+        + 18
+        + form_h + 16 + 20  # form boxes + label + dots
+        + 28          # sep
+        + 16 + rus_h  # label + translation
+        + (20 + ex_h if ex_h else 0)
+        + 36
+    )
+
+    img, d = _base_image(height, acc)
+    x = 32 + PAD
+    y = 32 + 24
+
+    y = _draw_header(d, acc, "IRREGULAR VERB", "↻", number, y)
+    y += 10
+
+    # 3 form boxes
+    boxes = [
+        (infinitive, False, "infinitive"),
+        (ps,         True,  "past simple"),
+        (pp,         False, "participle"),
+    ]
+    for i, (text, highlighted, lbl) in enumerate(boxes):
+        bx = x + i * (cell_w + 10)
+        bg = _tint(acc, 0.12) if highlighted else (247, 249, 252)
+        fg = acc if highlighted else (15, 23, 42)
+        d.rounded_rectangle([bx, y, bx + cell_w, y + form_h], radius=16, fill=bg)
+        fw = _text_w(d, text, f_form)
+        d.text((bx + (cell_w - fw) // 2, y + (form_h - _line_h(f_form)) // 2),
+               text, font=f_form, fill=fg)
+
+    y += form_h + 8
+
+    # labels under boxes
+    for i, (_, _, lbl) in enumerate(boxes):
+        bx = x + i * (cell_w + 10)
+        lw = _text_w(d, lbl.upper(), _font(10, bold=True))
+        d.text((bx + (cell_w - lw) // 2, y), lbl.upper(),
+               font=_font(10, bold=True), fill=(148, 163, 184))
+
+    y += _line_h(_font(10, bold=True)) + 12
+
+    # dots connector
+    dot_r = 5
+    dot_y = y + dot_r
+    positions = [x + cell_w // 2, x + cell_w + 10 + cell_w // 2, x + 2 * (cell_w + 10) + cell_w // 2]
+    for i, px in enumerate(positions):
+        d.ellipse([px - dot_r, dot_y - dot_r, px + dot_r, dot_y + dot_r], fill=acc)
+        if i < len(positions) - 1:
+            next_px = positions[i + 1]
+            d.line([(px + dot_r, dot_y), (next_px - dot_r, dot_y)],
+                   fill=(226, 232, 240), width=1)
+
+    y += dot_r * 2 + 10
+    y = _draw_sep(d, y)
+
+    # translation label
+    d.text((x, y), "ПЕРЕВОД", font=f_tr_lbl, fill=_tint(acc, 0.60))
+    y += _line_h(f_tr_lbl) + 10
+
+    # flag + translation
+    flag_r = 19
+    d.ellipse([x, y, x + flag_r * 2, y + flag_r * 2], fill=_tint(acc, 0.10))
+    d.text((x + flag_r - 9, y + flag_r - 10), "🇷🇺", font=_font(16))
+    tx = x + flag_r * 2 + 10
+    for line in rus_lines:
+        d.text((tx, y + 2), line, font=f_rus, fill=(30, 41, 59))
+        y += _line_h(f_rus) + 6
+
+    # example
+    if ex_lines:
+        y += 16
+        ex_bg = _tint(acc, 0.07)
+        ex_total_h = sum(_line_h(f_ex) + 5 for _ in ex_lines) + 24
+        d.rounded_rectangle([x, y, x + INNER, y + ex_total_h], radius=16, fill=ex_bg)
+        ey = y + 12
+        first = True
+        for line in ex_lines:
+            if first:
+                fq = _font(26)
+                d.text((x + 14, ey - 3), "“", font=fq, fill=(*acc, 80))
+                d.text((x + 30, ey), line, font=f_ex, fill=(71, 85, 105))
+            else:
+                d.text((x + 30, ey), line, font=f_ex, fill=(71, 85, 105))
+            ey += _line_h(f_ex) + 5
+            first = False
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return buf
