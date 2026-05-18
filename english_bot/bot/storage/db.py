@@ -512,6 +512,54 @@ async def student_detail(telegram_id: int) -> dict | None:
     }
 
 
+async def export_all_progress() -> tuple[list[dict], list[dict]]:
+    """Returns (vocab_rows, verb_rows) for CSV export."""
+    async with connect() as conn:
+        cur = await conn.execute(
+            """SELECT u.telegram_id, u.first_name, u.username,
+                      v.word, v.translation, v.lesson,
+                      vp.status, vp.correct_count, vp.wrong_count,
+                      vp.last_seen_at, vp.next_review_at
+               FROM vocabulary_progress vp
+               JOIN users u       ON u.telegram_id = vp.telegram_id
+               JOIN vocabulary v  ON v.id = vp.word_id
+               ORDER BY u.first_name, v.lesson, v.word"""
+        )
+        vocab_rows = [
+            {
+                "telegram_id": r[0], "student": r[1], "username": r[2],
+                "word": r[3], "translation": r[4], "lesson": r[5],
+                "status": r[6], "correct": r[7], "wrong": r[8],
+                "last_seen": r[9], "next_review": r[10],
+            }
+            for r in await cur.fetchall()
+        ]
+        cur = await conn.execute(
+            """SELECT u.telegram_id, u.first_name, u.username,
+                      iv.infinitive, iv.past_simple, iv.past_participle,
+                      iv.translation, iv.lesson,
+                      vp.status, vp.correct_count, vp.wrong_count,
+                      vp.past_simple_errors, vp.past_participle_errors,
+                      vp.last_seen_at, vp.next_review_at
+               FROM verb_progress vp
+               JOIN users u            ON u.telegram_id = vp.telegram_id
+               JOIN irregular_verbs iv ON iv.id = vp.verb_id
+               ORDER BY u.first_name, iv.lesson, iv.infinitive"""
+        )
+        verb_rows = [
+            {
+                "telegram_id": r[0], "student": r[1], "username": r[2],
+                "infinitive": r[3], "past_simple": r[4], "past_participle": r[5],
+                "translation": r[6], "lesson": r[7],
+                "status": r[8], "correct": r[9], "wrong": r[10],
+                "ps_errors": r[11], "pp_errors": r[12],
+                "last_seen": r[13], "next_review": r[14],
+            }
+            for r in await cur.fetchall()
+        ]
+    return vocab_rows, verb_rows
+
+
 async def vocab_stats(telegram_id: int) -> dict:
     async with connect() as conn:
         cur = await conn.execute(

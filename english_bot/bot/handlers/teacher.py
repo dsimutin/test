@@ -1,86 +1,138 @@
-"""Teacher-only commands:
-   /students            — list everyone with summary stats
-   /student <telegram>  — detailed view for one student
-   /myid                — show the caller's telegram_id (handy for setup)
+"""Teacher-only features:
+   /myid                — show caller's telegram_id (everyone)
+   /students  + 👥      — interactive student list with inline drill-down
+   /student <id>        — same detail view (textual entry)
+   📋 Экспорт CSV       — full progress dump as CSV file
 
-Access controlled by TEACHER_IDS env var (comma-separated telegram ids).
+Access controlled by TEACHER_IDS / TEACHER_USERNAMES env vars.
 """
 import html
 
-from aiogram import Router, types
+from aiogram import F, Router, types
 from aiogram.filters import Command
+from aiogram.types import (
+    BufferedInputFile,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 
 from ..config import Config
+from ..keyboards.reply import BTN_EXPORT, BTN_STUDENTS
+from ..services.exporter import build_progress_csv
 from ..storage import db
 
 router = Router(name="teacher")
 
+PAGE_SIZE = 10
+
+
+def _is_teacher(msg_or_cb, cfg: Config) -> bool:
+    u = msg_or_cb.from_user
+    return cfg.is_teacher(u.id, u.username)
+
+
+# ── /myid (everyone) ──────────────────────────────────────────────────────
 
 @router.message(Command("myid"))
 async def cmd_myid(msg: types.Message) -> None:
+    uname = f"@{msg.from_user.username}" if msg.from_user.username else "—"
     await msg.answer(
-        f"Твой Telegram ID: <code>{msg.from_user.id}</code>\n\n"
-        f"Чтобы стать преподавателем — добавь его в переменную "
-        f"<code>TEACHER_IDS</code> в Railway."
+        f"Твой Telegram ID: <code>{msg.from_user.id}</code>\n"
+        f"Username: {uname}\n\n"
+        "Чтобы стать преподавателем — добавь свой ID в "
+        "<code>TEACHER_IDS</code> или username в <code>TEACHER_USERNAMES</code> "
+        "(Railway → Variables)."
     )
 
 
-@router.message(Command("students"))
-async def cmd_students(msg: types.Message, cfg: Config) -> None:
-    if not cfg.is_teacher(msg.from_user.id, msg.from_user.username):
-        await msg.answer("⛔ Команда только для преподавателя.")
-        return
+# ── students list (reply button + slash command + inline pagination) ──────
 
+def _students_kb(rows: list[dict], page: int) -> InlineKeyboardMarkup:
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    chunk = rows[start:end]
+    buttons = []
+    for r in chunk:
+        name = r["first_name"] or (f"@{r['username']}" if r["username"]
+                                    else f"id {r['telegram_id']}")
+        # short summary in button text
+        summary = f"📚 {r['words_known']} · ⚡ {r['verbs_known']}"
+        buttons.append([InlineKeyboardButton(
+            text=f"{name}   {summary}",
+            callback_data=f"stu:detail:{r['telegram_id']}",
+        )])
+    # pagination row
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(
+            text="◀", callback_data=f"stu:list:{page - 1}"))
+    if end < len(rows):
+        nav.append(InlineKeyboardButton(
+            text="▶", callback_data=f"stu:list:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+async def _render_students_list(target, cfg: Config, page: int,
+                                  edit: bool = False) -> None:
     rows = await db.list_all_students()
     if not rows:
-        await msg.answer("Пока нет учеников.")
+        text = "Пока нет учеников. Дай им ссылку на бота!"
+        if edit:
+            await target.edit_text(text)
+        else:
+            await target.answer(text)
         return
-
-    lines = ["👥 <b>Ученики</b>\n"]
-    for i, r in enumerate(rows, 1):
-        name = html.escape(r["first_name"] or "—")
-        uname = f"@{r['username']}" if r["username"] else "—"
-        last = r["last_session"][:10] if r["last_session"] else "—"
-        lines.append(
-            f"{i}. <b>{name}</b>  {uname}\n"
-            f"   ID: <code>{r['telegram_id']}</code>\n"
-            f"   📚 выучено {r['words_known']}, повтор {r['words_review']}\n"
-            f"   ⚡ выучено {r['verbs_known']}, повтор {r['verbs_review']}\n"
-            f"   Последняя сессия: {last}\n"
-        )
-    lines.append(
-        "\nДетально: <code>/student &lt;ID&gt;</code>"
+    total_pages = (len(rows) - 1) // PAGE_SIZE + 1
+    text = (
+        f"👥 <b>Ученики</b> ({len(rows)})\n"
+        f"Страница {page + 1}/{total_pages}\n\n"
+        f"<i>Нажми на ученика для деталей.</i>"
     )
-    await msg.answer("\n".join(lines))
+    kb = _students_kb(rows, page)
+    if edit:
+        await target.edit_text(text, reply_markup=kb)
+    else:
+        await target.answer(text, reply_markup=kb)
 
 
-@router.message(Command("student"))
-async def cmd_student(msg: types.Message, cfg: Config) -> None:
-    if not cfg.is_teacher(msg.from_user.id, msg.from_user.username):
+@router.message(F.text == BTN_STUDENTS)
+@router.message(Command("students"))
+async def on_students(msg: types.Message, cfg: Config) -> None:
+    if not _is_teacher(msg, cfg):
         await msg.answer("⛔ Команда только для преподавателя.")
         return
+    await _render_students_list(msg, cfg, page=0)
 
-    parts = (msg.text or "").split()
-    if len(parts) < 2 or not parts[1].isdigit():
-        await msg.answer(
-            "Использование: <code>/student 123456789</code>\n"
-            "ID можно взять из <code>/students</code>."
-        )
+
+@router.callback_query(F.data.startswith("stu:list:"))
+async def cb_students_page(cb: types.CallbackQuery, cfg: Config) -> None:
+    if not _is_teacher(cb, cfg):
+        await cb.answer("⛔", show_alert=True)
         return
+    page = int(cb.data.split(":")[2])
+    await _render_students_list(cb.message, cfg, page=page, edit=True)
+    await cb.answer()
 
-    student_id = int(parts[1])
-    data = await db.student_detail(student_id)
-    if data is None:
-        await msg.answer("Ученик не найден.")
-        return
 
+# ── student detail (inline + slash) ───────────────────────────────────────
+
+def _detail_kb(student_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="◀ К списку",
+                              callback_data="stu:list:0"),
+    ]])
+
+
+def _format_student(data: dict) -> str:
     name = html.escape(data["first_name"] or "—")
     uname = f"@{data['username']}" if data["username"] else "—"
     created = data["created_at"][:10] if data["created_at"] else "—"
 
     lines = [
         f"👤 <b>{name}</b>  {uname}",
-        f"ID: <code>{student_id}</code>",
+        f"ID: <code>{data['telegram_id']}</code>",
         f"С нами с: {created}\n",
     ]
 
@@ -99,7 +151,7 @@ async def cmd_student(msg: types.Message, cfg: Config) -> None:
         lines.append("")
 
     if data["worst_words"]:
-        lines.append("<b>Слова с ошибками:</b>")
+        lines.append("<b>📚 Слова с ошибками:</b>")
         for w in data["worst_words"]:
             lines.append(
                 f"  • {html.escape(w['word'])} — "
@@ -109,7 +161,7 @@ async def cmd_student(msg: types.Message, cfg: Config) -> None:
         lines.append("")
 
     if data["worst_verbs"]:
-        lines.append("<b>Глаголы с ошибками:</b>")
+        lines.append("<b>⚡ Глаголы с ошибками:</b>")
         for v in data["worst_verbs"]:
             extra = []
             if v["ps_errors"]:
@@ -123,7 +175,61 @@ async def cmd_student(msg: types.Message, cfg: Config) -> None:
                 f"<i>(❌{v['wrong']} / ✓{v['correct']}){tag}</i>"
             )
 
-    if not data["sessions"] and not data["worst_words"] and not data["worst_verbs"]:
+    if not (data["sessions"] or data["worst_words"] or data["worst_verbs"]):
         lines.append("<i>Пока нет активности.</i>")
 
-    await msg.answer("\n".join(lines))
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data.startswith("stu:detail:"))
+async def cb_student_detail(cb: types.CallbackQuery, cfg: Config) -> None:
+    if not _is_teacher(cb, cfg):
+        await cb.answer("⛔", show_alert=True)
+        return
+    student_id = int(cb.data.split(":")[2])
+    data = await db.student_detail(student_id)
+    if data is None:
+        await cb.answer("Ученик не найден.", show_alert=True)
+        return
+    await cb.message.edit_text(_format_student(data),
+                                reply_markup=_detail_kb(student_id))
+    await cb.answer()
+
+
+@router.message(Command("student"))
+async def cmd_student(msg: types.Message, cfg: Config) -> None:
+    if not _is_teacher(msg, cfg):
+        await msg.answer("⛔ Команда только для преподавателя.")
+        return
+    parts = (msg.text or "").split()
+    if len(parts) < 2 or not parts[1].isdigit():
+        await msg.answer("Использование: <code>/student 123456789</code>")
+        return
+    data = await db.student_detail(int(parts[1]))
+    if data is None:
+        await msg.answer("Ученик не найден.")
+        return
+    await msg.answer(_format_student(data),
+                      reply_markup=_detail_kb(data["telegram_id"]))
+
+
+# ── CSV export ────────────────────────────────────────────────────────────
+
+@router.message(F.text == BTN_EXPORT)
+@router.message(Command("export"))
+async def on_export(msg: types.Message, cfg: Config) -> None:
+    if not _is_teacher(msg, cfg):
+        await msg.answer("⛔ Команда только для преподавателя.")
+        return
+    await msg.answer("⏳ Готовлю выгрузку…")
+    data, filename = await build_progress_csv()
+    if not data or data == b"\xef\xbb\xbf":  # only BOM, no rows
+        await msg.answer("Пока нет данных для выгрузки.")
+        return
+    await msg.answer_document(
+        BufferedInputFile(data, filename=filename),
+        caption=(
+            "📋 Полный прогресс всех учеников.\n"
+            "Открой в Excel / Google Sheets (разделитель — точка с запятой)."
+        ),
+    )
