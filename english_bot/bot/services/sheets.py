@@ -223,17 +223,18 @@ def _read_spreadsheet(client, spreadsheet_id: str
 
 # ── _students sheet handling ─────────────────────────────────────────────
 
-def _ensure_students_sheet(ss) -> list[dict]:
-    """Returns the parsed `_students` rows. Creates the sheet if missing."""
+def _get_or_create_students_ws(ss):
     try:
-        ws = ss.worksheet(STUDENTS_SHEET)
+        return ss.worksheet(STUDENTS_SHEET)
     except gspread.WorksheetNotFound:
-        ws = ss.add_worksheet(title=STUDENTS_SHEET, rows=50, cols=4)
-        ws.update("A1", [STUDENTS_HEADER + [""]])  # extra col so update sticks
+        ws = ss.add_worksheet(title=STUDENTS_SHEET, rows=200, cols=4)
+        ws.update("A1", [STUDENTS_HEADER])
         ws.format("A1:D1", {"textFormat": {"bold": True}})
-        logger.info("Created %s sheet — fill it in to enable multi-tenant",
-                    STUDENTS_SHEET)
-        return []
+        logger.info("Created %s sheet", STUDENTS_SHEET)
+        return ws
+
+
+def _read_students_rows(ws) -> list[dict]:
     try:
         records = ws.get_all_records(expected_headers=STUDENTS_HEADER)
     except Exception:
@@ -247,9 +248,63 @@ def _ensure_students_sheet(ss) -> list[dict]:
             "telegram_id": int(tid),
             "name": str(r.get("name") or "").strip(),
             "spreadsheet_id": str(r.get("spreadsheet_id") or "").strip(),
-            "active_lessons": str(r.get("active_lessons") or "*").strip(),
+            "active_lessons": str(r.get("active_lessons") or "").strip() or "*",
         })
     return rows
+
+
+def _ensure_students_sheet(ss, known_users: list[tuple]) -> list[dict]:
+    """Returns the up-to-date `_students` rows.
+
+    - Creates the sheet if missing
+    - Auto-appends any registered users (from DB) not yet present, with
+      empty spreadsheet_id and active_lessons='*' (so they get default
+      content out of the box)
+    - Never modifies rows the teacher has already edited
+    """
+    ws = _get_or_create_students_ws(ss)
+    rows = _read_students_rows(ws)
+    existing = {r["telegram_id"] for r in rows}
+
+    new_rows = []
+    for u in known_users:
+        tid, username, first_name, _ = u
+        if tid in existing:
+            continue
+        display = first_name or (f"@{username}" if username else f"id {tid}")
+        new_rows.append([tid, display, "", "*"])
+        rows.append({
+            "telegram_id": tid, "name": display,
+            "spreadsheet_id": "", "active_lessons": "*",
+        })
+        existing.add(tid)
+
+    if new_rows:
+        ws.append_rows(new_rows, value_input_option="RAW")
+        logger.info("Auto-added %d new student(s) to %s",
+                    len(new_rows), STUDENTS_SHEET)
+    return rows
+
+
+def append_student_row(cfg: Config, telegram_id: int,
+                        name: str) -> None:
+    """Best-effort immediate append. Called right when a brand-new user
+    starts the bot, so the row appears within seconds (not after the
+    next 30-min sync)."""
+    try:
+        client = gspread.authorize(_creds(cfg))
+        ss = client.open_by_key(cfg.spreadsheet_id)
+        ws = _get_or_create_students_ws(ss)
+        existing = {r["telegram_id"] for r in _read_students_rows(ws)}
+        if telegram_id in existing:
+            return
+        ws.append_row([telegram_id, name, "", "*"],
+                      value_input_option="RAW")
+        logger.info("New student %s (%s) added to %s",
+                    telegram_id, name, STUDENTS_SHEET)
+    except Exception as e:
+        logger.warning("Failed to add student %s to %s: %s",
+                       telegram_id, STUDENTS_SHEET, e)
 
 
 def _lessons_match(item_lesson, item_level: str, active: str) -> bool:
@@ -265,12 +320,12 @@ def _lessons_match(item_lesson, item_level: str, active: str) -> bool:
 
 # ── orchestrator (blocking) ──────────────────────────────────────────────
 
-def _sync_blocking(cfg: Config) -> dict:
+def _sync_blocking(cfg: Config, known_users: list[tuple]) -> dict:
     """Returns summary stats. Heavy work — runs in a thread."""
     client = gspread.authorize(_creds(cfg))
     main_ss = client.open_by_key(cfg.spreadsheet_id)
 
-    student_rows = _ensure_students_sheet(main_ss)
+    student_rows = _ensure_students_sheet(main_ss, known_users)
 
     # Always also read the main spreadsheet (default content pool)
     main_vocab, main_verbs = _read_spreadsheet(client, cfg.spreadsheet_id)
@@ -335,7 +390,10 @@ def _sync_blocking(cfg: Config) -> dict:
 
 async def sync_from_sheets(cfg: Config) -> tuple[int, int]:
     loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(None, _sync_blocking, cfg)
+    known_users = await db.dump_users()
+    result = await loop.run_in_executor(
+        None, _sync_blocking, cfg, known_users
+    )
 
     # Upsert all collected content (deduplicated by id)
     nv = await db.upsert_vocabulary(result["vocab_items"])

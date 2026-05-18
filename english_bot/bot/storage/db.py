@@ -142,15 +142,17 @@ async def init() -> None:
 # ── users ─────────────────────────────────────────────────────────────────
 
 async def ensure_user(telegram_id: int, username: str | None,
-                      first_name: str | None) -> None:
+                      first_name: str | None) -> bool:
+    """Returns True if a new row was inserted (first interaction)."""
     async with connect() as conn:
-        await conn.execute(
+        cur = await conn.execute(
             """INSERT OR IGNORE INTO users
                (telegram_id, username, first_name, created_at)
                VALUES (?, ?, ?, ?)""",
             (telegram_id, username, first_name, datetime.utcnow().isoformat()),
         )
         await conn.commit()
+        return cur.rowcount > 0
 
 
 # ── content (upsert from sheets) ──────────────────────────────────────────

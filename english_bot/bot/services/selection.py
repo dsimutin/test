@@ -1,17 +1,15 @@
-"""Pick next N items per student. Two-step:
+"""Pick next N items per student.
 
-1. Determine the candidate pool:
-   - If teacher set up multi-tenant mode (any rows in `_students`):
-     take only items explicitly assigned to this student.
-     If the student has no assignments at all → empty pool (teacher
-     hasn't added them yet).
-   - Otherwise (single-tenant fallback) — all active items.
+Pool = student_assignments for this user.
+If the user has no assignments AND has no config row in _students yet
+(brand new, sync hasn't run), fall back to global active pool so they
+aren't blocked from learning.
 
-2. Order pool by priority:
-   1. repeat
-   2. learning
-   3. new
-   4. oldest last_seen_at
+Order pool by priority:
+  1. repeat
+  2. learning
+  3. new
+  4. oldest last_seen_at
 """
 from __future__ import annotations
 
@@ -31,10 +29,12 @@ async def pick_verb_ids(telegram_id: int, n: int) -> list[str]:
 
 
 async def _candidate_pool(telegram_id: int, item_type: str) -> list[str]:
-    multi_tenant = await db.has_students_config()
-    if multi_tenant:
-        return await db.get_assigned_ids(telegram_id, item_type)
-    # single-tenant fallback
+    assigned = await db.get_assigned_ids(telegram_id, item_type)
+    if assigned:
+        return assigned
+    # No assignments yet — either sync hasn't run, or teacher set
+    # spreadsheet_id to one that has no rows. Fall back to global so
+    # the student isn't blocked.
     if item_type == "word":
         return await db.fetch_active_vocabulary_ids()
     return await db.fetch_active_verb_ids()

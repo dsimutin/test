@@ -96,8 +96,9 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp["cfg"] = cfg
 
-    dp.message.outer_middleware(EnsureUserMiddleware())
-    dp.callback_query.outer_middleware(EnsureUserMiddleware())
+    ensure_user_mw = EnsureUserMiddleware(cfg)
+    dp.message.outer_middleware(ensure_user_mw)
+    dp.callback_query.outer_middleware(ensure_user_mw)
 
     dp.include_router(start_router.router)
     dp.include_router(teacher_router.router)
