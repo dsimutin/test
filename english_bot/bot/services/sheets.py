@@ -292,23 +292,19 @@ def _ensure_students_sheet(ss, known_users: list[tuple]) -> list[dict]:
 
 def append_student_row(cfg: Config, telegram_id: int,
                         name: str) -> None:
-    """Best-effort immediate append. Called right when a brand-new user
-    starts the bot, so the row appears within seconds (not after the
-    next 30-min sync)."""
-    try:
-        client = gspread.authorize(_creds(cfg))
-        ss = client.open_by_key(cfg.spreadsheet_id)
-        ws = _get_or_create_students_ws(ss)
-        existing = {r["telegram_id"] for r in _read_students_rows(ws)}
-        if telegram_id in existing:
-            return
-        ws.append_row([telegram_id, name, "", ""],
-                      value_input_option="RAW")
-        logger.info("New student %s (%s) added to %s",
-                    telegram_id, name, STUDENTS_SHEET)
-    except Exception as e:
-        logger.warning("Failed to add student %s to %s: %s",
-                       telegram_id, STUDENTS_SHEET, e)
+    """Idempotent: appends a row to _students iff the telegram_id isn't
+    already present. Called from middleware on first interaction."""
+    client = gspread.authorize(_creds(cfg))
+    ss = client.open_by_key(cfg.spreadsheet_id)
+    ws = _get_or_create_students_ws(ss)
+    existing = {r["telegram_id"] for r in _read_students_rows(ws)}
+    if telegram_id in existing:
+        logger.info("Student %s already in %s — skipping",
+                    telegram_id, STUDENTS_SHEET)
+        return
+    ws.append_row([telegram_id, name, "", ""], value_input_option="RAW")
+    logger.info("✅ Added student %s (%s) to %s",
+                telegram_id, name, STUDENTS_SHEET)
 
 
 # ── orchestrator (blocking) ──────────────────────────────────────────────

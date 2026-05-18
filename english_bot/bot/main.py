@@ -83,11 +83,12 @@ async def main() -> None:
 
     await card_renderer.startup()
 
-    # Step 1: pull fresh content from the user's sheets
-    await _safe_sync(cfg, tag="startup")
-    # Step 2: if SQLite is empty (fresh container) — restore progress from
-    #         the snapshot sheets so a redeploy doesn't wipe student data.
+    # Step 1: if SQLite is empty (fresh container) — restore progress and
+    #         user list from the snapshot sheets. Must run BEFORE sync so
+    #         the sync sees existing users and registers them in _students.
     await _safe_restore(cfg)
+    # Step 2: pull fresh content from the user's sheets, reconcile _students
+    await _safe_sync(cfg, tag="startup")
 
     bot = Bot(
         token=cfg.bot_token,
