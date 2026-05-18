@@ -1,6 +1,6 @@
 [build]
 builder = "nixpacks"
-buildCommand = "apt-get install -y fonts-dejavu-core 2>/dev/null || true && pip install -r requirements.txt"
+buildCommand = "pip install -r requirements.txt && playwright install chromium --with-deps"
 
 [deploy]
 startCommand = "python bot.py"

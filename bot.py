@@ -31,7 +31,7 @@ from database import (
     sync_words,
     update_progress,
 )
-from card_renderer import render_verb_card, render_word_card
+from card_renderer import pick_accent, render_verb_card, render_word_card
 from sheets import fetch_vocabulary, get_sheets_info, write_learned_word
 from spaced_repetition import next_review_date, sm2
 
@@ -194,12 +194,18 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: b
         "past_participle":past_participle or "",
     })
 
+    session_count = context.user_data.get("session_count", 0)
+    number = f"{session_count + 1:02d}"
+    accent = pick_accent(word_id)
+
     if mode == "word":
         image = render_word_card(english, russian,
-                                 transcription or "", example or "")
+                                 transcription or "", example or "",
+                                 number=number, accent=accent)
     else:
         image = render_verb_card(english, russian,
                                  past_simple or "", past_participle or "",
+                                 number=number, accent=accent,
                                  example=example or "")
 
     kb = _card_keyboard()
