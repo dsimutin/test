@@ -1,3 +1,4 @@
+import json
 import os
 from typing import List, Optional, Tuple
 
@@ -8,11 +9,17 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 
 def fetch_vocabulary() -> List[Tuple[str, str, Optional[str]]]:
-    creds_file = os.environ["GOOGLE_CREDENTIALS_FILE"]
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
     sheet_name = os.environ.get("SHEET_NAME", "vocabulary")
 
-    creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
+    # Support credentials either as a JSON string in env var or as a file path
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        info = json.loads(creds_json)
+        creds = Credentials.from_service_account_info(info, scopes=SCOPES)
+    else:
+        creds_file = os.environ["GOOGLE_CREDENTIALS_FILE"]
+        creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
     client = gspread.authorize(creds)
 
     if spreadsheet_id:
