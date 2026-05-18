@@ -10,6 +10,12 @@ from google.oauth2.service_account import Credentials
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 PROGRESS_SHEET_NAME = "Прогресс учеников"
+
+# Листы которые нужно полностью игнорировать
+SKIP_SHEET_KEYWORDS = (
+    "произношение", "pronunciation", "progress tracker",
+    "progress", "traps", "rules", "phonetics",
+)
 PROGRESS_HEADERS = ["Дата", "Ученик", "Telegram ID", "Слово / Глагол", "Тип", "Правильных ответов"]
 
 logger = logging.getLogger(__name__)
@@ -49,18 +55,26 @@ def _val(row: List[str], idx: int | None) -> str | None:
     return v or None
 
 
+def _should_skip_sheet(ws) -> bool:
+    title = ws.title.lower()
+    return (
+        title == PROGRESS_SHEET_NAME.lower()
+        or any(k in title for k in SKIP_SHEET_KEYWORDS)
+    )
+
+
 def _is_verb_sheet(ws, header: List[str], idx: int) -> bool:
     title = ws.title.lower()
-    # By title
-    if any(k in title for k in ("глагол", "verb", "irregular")):
+    # By sheet title containing verb-related word
+    if any(k in title for k in ("глагол", "irregular")):
         return True
-    # By presence of past-simple column (many possible names)
+    # Sheet literally named "verbs" or "verb" (exact or with spaces)
+    if title.strip() in ("verb", "verbs"):
+        return True
+    # By presence of past-simple column
     if _col(header,
             "past simple", "past_simple", "прошедшее", "v2",
             "форма 2", "2 форма", "форма2") is not None:
-        return True
-    # Fallback: non-first sheet that has no standard word column
-    if idx >= 1 and _col(header, "word", "слово", "english") is None:
         return True
     return False
 
@@ -96,7 +110,7 @@ def fetch_vocabulary() -> List[Tuple]:
     seen_verbs: set = set()
 
     for idx, ws in enumerate(spreadsheet.worksheets()):
-        if ws.title == PROGRESS_SHEET_NAME:
+        if _should_skip_sheet(ws):
             continue
         rows = ws.get_all_values()
         if not rows:
@@ -105,8 +119,9 @@ def fetch_vocabulary() -> List[Tuple]:
 
         if _is_verb_sheet(ws, header, idx):
             inf_col = _col(header,
-                "infinitive", "инфинитив", "глагол", "word", "слово", "v1", "english",
-                "форма 1", "1 форма", "форма1", "base form", "начальная форма")
+                "verb", "infinitive", "инфинитив", "глагол", "word", "слово",
+                "v1", "english", "форма 1", "1 форма", "форма1",
+                "base form", "начальная форма")
             rus_col = _col(header,
                 "translation", "перевод", "russian", "значение")
             ps_col  = _col(header,
@@ -137,7 +152,7 @@ def fetch_vocabulary() -> List[Tuple]:
             eng_col = _col(header, "word", "слово", "english")
             rus_col = _col(header, "translation", "перевод", "russian", "значение")
             tr_col  = _col(header, "transcription", "транскрипция", "ipa")
-            ex_col  = _col(header, "example", "пример")
+            ex_col  = _col(header, "example", "пример", "подсказка")
 
             logger.info("Word sheet «%s»: eng=%s rus=%s tr=%s ex=%s",
                         ws.title, eng_col, rus_col, tr_col, ex_col)
