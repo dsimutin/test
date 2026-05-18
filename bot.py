@@ -1,5 +1,6 @@
 import logging
 import os
+import random
 
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -14,6 +15,7 @@ from database import (
     get_card_counts,
     get_due_cards,
     get_or_create_progress,
+    get_random_options,
     get_user_stats,
     init_db,
     sync_words,
@@ -23,91 +25,142 @@ from sheets import fetch_vocabulary
 from spaced_repetition import next_review_date, sm2
 
 load_dotenv()
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-
-# ── keyboards ─────────────────────────────────────────────────────────────────
-
-def _mode_keyboard(counts: dict) -> InlineKeyboardMarkup:
-    words_due = counts.get("word", 0)
-    verbs_due = counts.get("verb", 0)
-    rows = []
-    if words_due:
-        rows.append([InlineKeyboardButton(
-            f"📖 Слова ({words_due} карточек)", callback_data="mode_word"
-        )])
-    if verbs_due:
-        rows.append([InlineKeyboardButton(
-            f"⚡ Неправильные глаголы ({verbs_due} карточек)", callback_data="mode_verb"
-        )])
-    if not rows:
-        return None
-    return InlineKeyboardMarkup(rows)
-
-
-def _card_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("👁 Показать ответ", callback_data="show_answer")]]
-    )
-
-
-def _rating_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[
-        InlineKeyboardButton("❌ Снова", callback_data="rate_1"),
-        InlineKeyboardButton("😐 Сложно", callback_data="rate_3"),
-        InlineKeyboardButton("✅ Легко", callback_data="rate_5"),
-    ]])
+LINE = "──────────────────"
 
 
 # ── card text builders ────────────────────────────────────────────────────────
 
-def _word_card_question(english: str, example: str | None) -> str:
-    text = f"📖 *{english}*"
+def _word_card_text(english, russian, transcription, example, position=None) -> str:
+    lines = [
+        LINE,
+        f"📖  *{english}*",
+        LINE,
+    ]
+    if transcription:
+        lines.append(f"\n🔤  _{transcription}_")
+    lines.append(f"\n🇷🇺  *{russian}*")
     if example:
-        text += f"\n\n_{example}_"
-    return text
+        lines.append(f"\n💬  _{example}_")
+    if position:
+        lines.append(f"\n{LINE}\n_{position}_")
+    return "\n".join(lines)
 
 
-def _word_card_answer(english: str, russian: str, example: str | None) -> str:
-    text = f"📖 *{english}*"
-    if example:
-        text += f"\n_{example}_"
-    text += f"\n\n🇷🇺 *{russian}*"
-    return text
+def _verb_card_text(infinitive, russian, past_simple, past_participle, position=None) -> str:
+    ps = past_simple or "—"
+    pp = past_participle or "—"
+    lines = [
+        LINE,
+        f"⚡  *Неправильный глагол*",
+        LINE,
+        f"\n*V1*  {infinitive}   —   _{russian}_",
+        f"*V2*  {ps}",
+        f"*V3*  {pp}",
+    ]
+    if position:
+        lines.append(f"\n{LINE}\n_{position}_")
+    return "\n".join(lines)
 
 
-def _verb_card_question(infinitive: str) -> str:
-    return (
-        f"⚡ *{infinitive}*\n\n"
-        f"Как будет Past Simple и Past Participle?"
+def _quiz_word_text(english, transcription) -> str:
+    lines = [
+        LINE,
+        f"🎯  *Проверка*",
+        LINE,
+        f"\nВыбери правильный перевод:\n",
+        f"*{english}*",
+    ]
+    if transcription:
+        lines.append(f"_{transcription}_")
+    return "\n".join(lines)
+
+
+def _quiz_verb_text(infinitive, russian) -> str:
+    return "\n".join([
+        LINE,
+        f"🎯  *Проверка глагола*",
+        LINE,
+        f"\nВыбери правильный *Past Simple (V2)*:\n",
+        f"*{infinitive}*  —  _{russian}_",
+    ])
+
+
+# ── keyboards ─────────────────────────────────────────────────────────────────
+
+def _study_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Знаю", callback_data="know"),
+            InlineKeyboardButton("🔄 Повторить", callback_data="again"),
+        ],
+        [InlineKeyboardButton("🎯 Проверить себя", callback_data="quiz")],
+    ])
+
+
+def _options_keyboard(options: list[str]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton(opt, callback_data=f"ans_{i}")] for i, opt in enumerate(options)]
     )
 
 
-def _verb_card_answer(infinitive: str, russian: str, past_simple: str, past_participle: str) -> str:
-    return (
-        f"⚡ *{infinitive}* — {russian}\n\n"
-        f"▸ Past Simple: *{past_simple}*\n"
-        f"▸ Past Participle: *{past_participle}*"
-    )
+def _result_keyboard(chosen_idx: int, correct_idx: int, options: list[str], correct: bool) -> InlineKeyboardMarkup:
+    rows = []
+    for i, opt in enumerate(options):
+        if i == correct_idx:
+            rows.append([InlineKeyboardButton(f"✓  {opt}", callback_data="noop")])
+        elif i == chosen_idx and not correct:
+            rows.append([InlineKeyboardButton(f"✗  {opt}", callback_data="noop")])
+    rows.append([InlineKeyboardButton("→ Следующая карточка", callback_data="next")])
+    return InlineKeyboardMarkup(rows)
 
 
-# ── send next card ────────────────────────────────────────────────────────────
+def _mode_keyboard(counts: dict) -> InlineKeyboardMarkup:
+    rows = []
+    if counts.get("word"):
+        rows.append([InlineKeyboardButton(
+            f"📖 Слова — {counts['word']} карточек", callback_data="mode_word"
+        )])
+    if counts.get("verb"):
+        rows.append([InlineKeyboardButton(
+            f"⚡ Неправильные глаголы — {counts['verb']} карточек", callback_data="mode_verb"
+        )])
+    return InlineKeyboardMarkup(rows)
 
-async def _send_next_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
+
+# ── core: show card / show quiz ───────────────────────────────────────────────
+
+def _prepare_card(user_id: int, mode: str) -> dict | None:
+    """Fetch next due card and return a state dict, or None if nothing due."""
+    due = get_due_cards(user_id, card_type=mode, limit=1)
+    if not due:
+        return None
+    row = due[0]
+    word_id, english, russian, transcription, example, past_simple, past_participle = row
+    return {
+        "word_id": word_id,
+        "english": english,
+        "russian": russian,
+        "transcription": transcription or "",
+        "example": example or "",
+        "past_simple": past_simple or "",
+        "past_participle": past_participle or "",
+    }
+
+
+async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: bool = False):
     user_id = update.effective_user.id
     mode = context.user_data.get("mode", "word")
+    card = _prepare_card(user_id, mode)
 
-    due = get_due_cards(user_id, card_type=mode, limit=1)
-
-    if not due:
-        # Try to switch to other mode if it has cards
-        other_mode = "verb" if mode == "word" else "word"
-        other_due = get_due_cards(user_id, card_type=other_mode, limit=1)
-        if other_due:
-            mode_name = "слова" if other_mode == "word" else "неправильные глаголы"
-            text = f"🎉 В этом разделе всё готово на сегодня!\n\nПереключиться на *{mode_name}*? Напиши /study"
+    if card is None:
+        other = "verb" if mode == "word" else "word"
+        other_card = _prepare_card(user_id, other)
+        if other_card:
+            other_name = "слова" if other == "word" else "неправильные глаголы"
+            text = f"🎉 В этом разделе всё готово на сегодня!\n\nПопробуй *{other_name}* — напиши /study"
         else:
             text = "🎉 На сегодня всё! Все карточки повторены.\nВозвращайся завтра 👋"
         if edit:
@@ -116,29 +169,55 @@ async def _send_next_card(update: Update, context: ContextTypes.DEFAULT_TYPE, ed
             await update.message.reply_text(text, parse_mode="Markdown")
         return
 
-    word_id, english, russian, example, past_simple, past_participle = due[0]
-    context.user_data.update({
-        "word_id": word_id,
-        "english": english,
-        "russian": russian,
-        "example": example or "",
-        "past_simple": past_simple or "",
-        "past_participle": past_participle or "",
-    })
+    context.user_data.update(card)
 
-    if mode == "verb":
-        text = _verb_card_question(english)
+    if mode == "word":
+        text = _word_card_text(
+            card["english"], card["russian"],
+            card["transcription"], card["example"],
+        )
     else:
-        text = _word_card_question(english, example)
+        text = _verb_card_text(
+            card["english"], card["russian"],
+            card["past_simple"], card["past_participle"],
+        )
 
+    kb = _study_keyboard()
     if edit:
-        await update.callback_query.edit_message_text(
-            text, reply_markup=_card_keyboard(), parse_mode="Markdown"
-        )
+        await update.callback_query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
     else:
-        await update.message.reply_text(
-            text, reply_markup=_card_keyboard(), parse_mode="Markdown"
-        )
+        await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
+async def _send_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    mode = context.user_data.get("mode", "word")
+    word_id   = context.user_data["word_id"]
+    english   = context.user_data["english"]
+    russian   = context.user_data["russian"]
+    transcription = context.user_data.get("transcription", "")
+    past_simple   = context.user_data.get("past_simple", "")
+
+    if mode == "word":
+        correct_answer = russian
+        wrong_answers  = get_random_options(word_id, "word", "russian", count=2)
+        text = _quiz_word_text(english, transcription)
+    else:
+        correct_answer = past_simple
+        wrong_answers  = get_random_options(word_id, "verb", "past_simple", count=2)
+        text = _quiz_verb_text(english, russian)
+
+    options = wrong_answers + [correct_answer]
+    random.shuffle(options)
+    correct_idx = options.index(correct_answer)
+
+    context.user_data["quiz_options"]     = options
+    context.user_data["quiz_correct_idx"] = correct_idx
+
+    await update.callback_query.edit_message_text(
+        text,
+        reply_markup=_options_keyboard(options),
+        parse_mode="Markdown",
+    )
 
 
 # ── command handlers ──────────────────────────────────────────────────────────
@@ -159,20 +238,18 @@ async def cmd_study(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not counts:
         await update.message.reply_text(
-            "📭 Карточек пока нет. Сначала загрузи слова командой /sync"
+            "📭 Карточек пока нет. Загрузи слова командой /sync"
         )
         return
 
-    # If only one type available — start immediately
     if len(counts) == 1:
         context.user_data["mode"] = next(iter(counts))
-        await _send_next_card(update, context)
+        await _send_card(update, context)
         return
 
-    keyboard = _mode_keyboard(counts)
     await update.message.reply_text(
         "Что будем учить сегодня?",
-        reply_markup=keyboard,
+        reply_markup=_mode_keyboard(counts),
     )
 
 
@@ -180,16 +257,13 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     stats = get_user_stats(user_id)
 
-    lines = ["📊 *Твоя статистика*\n"]
-
+    lines = [f"📊 *Твоя статистика*\n{LINE}\n"]
     for card_type, s in stats.items():
         label = "📖 Слова" if card_type == "word" else "⚡ Неправильные глаголы"
         pct = ""
         if s["total_reviews"]:
-            pct = f" (точность {round(s['correct_reviews'] / s['total_reviews'] * 100)}%)"
-        lines.append(
-            f"{label}: выучено {s['learned']}/{s['total']}{pct}"
-        )
+            pct = f"   точность {round(s['correct_reviews'] / s['total_reviews'] * 100)}%"
+        lines.append(f"{label}\nВыучено: {s['learned']} / {s['total']}{pct}\n")
 
     await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
 
@@ -199,10 +273,10 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         words = fetch_vocabulary()
         new = sync_words(words)
-        word_count = sum(1 for w in words if w[3] == "word")
-        verb_count = sum(1 for w in words if w[3] == "verb")
+        word_count = sum(1 for w in words if w[4] == "word")
+        verb_count = sum(1 for w in words if w[4] == "verb")
         await msg.edit_text(
-            f"✅ Готово! Добавлено новых карточек: *{new}*\n"
+            f"✅ Готово! Добавлено новых карточек: *{new}*\n\n"
             f"📖 Слов в таблице: {word_count}\n"
             f"⚡ Неправильных глаголов: {verb_count}",
             parse_mode="Markdown",
@@ -217,56 +291,83 @@ async def cmd_sync(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def on_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    user_id = update.effective_user.id
     data = query.data
+    user_id = update.effective_user.id
+
+    if data == "noop":
+        return
 
     if data.startswith("mode_"):
-        context.user_data["mode"] = data[5:]  # "word" or "verb"
-        await _send_next_card(update, context, edit=True)
+        context.user_data["mode"] = data[5:]
+        await _send_card(update, context, edit=True)
+        return
 
-    elif data == "show_answer":
+    if data == "quiz":
+        await _send_quiz(update, context)
+        return
+
+    if data.startswith("ans_"):
+        chosen_idx  = int(data.split("_")[1])
+        correct_idx = context.user_data.get("quiz_correct_idx", 0)
+        options     = context.user_data.get("quiz_options", [])
+        correct     = chosen_idx == correct_idx
+        quality     = 5 if correct else 1
+
+        # save result
+        _record_progress(user_id, context, quality)
+        context.user_data["quiz_quality"] = quality
+
         mode = context.user_data.get("mode", "word")
         english = context.user_data.get("english", "")
         russian = context.user_data.get("russian", "")
-        example = context.user_data.get("example", "")
-        past_simple = context.user_data.get("past_simple", "")
-        past_participle = context.user_data.get("past_participle", "")
+        transcription = context.user_data.get("transcription", "")
+        past_simple   = context.user_data.get("past_simple", "")
 
-        if mode == "verb":
-            text = _verb_card_answer(english, russian, past_simple, past_participle)
+        if mode == "word":
+            base_text = _quiz_word_text(english, transcription)
         else:
-            text = _word_card_answer(english, russian, example)
+            base_text = _quiz_verb_text(english, russian)
+
+        if correct:
+            result_line = "\n\n✅ *Правильно!*"
+        else:
+            right = options[correct_idx]
+            result_line = f"\n\n❌ Неверно\nПравильный ответ: *{right}*"
 
         await query.edit_message_text(
-            text, reply_markup=_rating_keyboard(), parse_mode="Markdown"
+            base_text + result_line,
+            reply_markup=_result_keyboard(chosen_idx, correct_idx, options, correct),
+            parse_mode="Markdown",
         )
+        return
 
-    elif data.startswith("rate_"):
-        quality = int(data.split("_")[1])
-        word_id = context.user_data.get("word_id")
+    if data in ("know", "again", "next"):
+        if data == "know":
+            _record_progress(user_id, context, quality=5)
+        elif data == "again":
+            _record_progress(user_id, context, quality=1)
+        # "next" — progress already saved after quiz answer
+        await _send_card(update, context, edit=True)
+        return
 
-        if word_id is None:
-            await query.edit_message_text("Сессия устарела. Напиши /study заново.")
-            return
 
-        progress = get_or_create_progress(user_id, word_id)
-        new_ef, new_interval, new_reps = sm2(
-            quality,
-            progress["ease_factor"],
-            progress["interval"],
-            progress["repetitions"],
-        )
-        update_progress(
-            user_id,
-            word_id,
-            new_ef,
-            new_interval,
-            new_reps,
-            next_review_date(new_interval),
-            correct=1 if quality >= 3 else 0,
-        )
-
-        await _send_next_card(update, context, edit=True)
+def _record_progress(user_id: int, context: ContextTypes.DEFAULT_TYPE, quality: int):
+    word_id = context.user_data.get("word_id")
+    if word_id is None:
+        return
+    progress = get_or_create_progress(user_id, word_id)
+    new_ef, new_interval, new_reps = sm2(
+        quality,
+        progress["ease_factor"],
+        progress["interval"],
+        progress["repetitions"],
+    )
+    update_progress(
+        user_id, word_id,
+        new_ef, new_interval, new_reps,
+        next_review_date(new_interval),
+        correct=1 if quality >= 3 else 0,
+    )
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

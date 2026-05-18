@@ -1,11 +1,11 @@
 import os
+import random
 import sqlite3
 from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 DB_PATH = os.environ.get("DB_PATH", "flashcards.db")
-
-LEARNED_THRESHOLD = 5  # correct answers to consider a card "learned"
+LEARNED_THRESHOLD = 5
 
 
 def _conn():
@@ -20,28 +20,31 @@ def init_db():
     c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS words (
-            id      INTEGER PRIMARY KEY AUTOINCREMENT,
-            english TEXT    NOT NULL,
-            russian TEXT    NOT NULL,
-            example TEXT,
-            card_type TEXT  NOT NULL DEFAULT 'word'
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            english         TEXT    NOT NULL,
+            russian         TEXT    NOT NULL,
+            transcription   TEXT,
+            example         TEXT,
+            card_type       TEXT    NOT NULL DEFAULT 'word',
+            past_simple     TEXT,
+            past_participle TEXT
         )
     """)
-    # For irregular verbs: english=infinitive, russian=translation,
-    # past_simple and past_participle stored in extra columns
-    c.execute("PRAGMA table_info(words)")
-    cols = {row[1] for row in c.fetchall()}
-    if "past_simple" not in cols:
-        c.execute("ALTER TABLE words ADD COLUMN past_simple TEXT")
-    if "past_participle" not in cols:
-        c.execute("ALTER TABLE words ADD COLUMN past_participle TEXT")
+    # migration: add columns if they don't exist yet
+    existing = {row[1] for row in c.execute("PRAGMA table_info(words)")}
+    for col, typedef in [
+        ("transcription",   "TEXT"),
+        ("past_simple",     "TEXT"),
+        ("past_participle", "TEXT"),
+        ("card_type",       "TEXT NOT NULL DEFAULT 'word'"),
+    ]:
+        if col not in existing:
+            c.execute(f"ALTER TABLE words ADD COLUMN {col} {typedef}")
 
-    # Unique index: (english, card_type)
     c.execute("""
         CREATE UNIQUE INDEX IF NOT EXISTS idx_words_unique
         ON words(english, card_type)
     """)
-
     c.execute("""
         CREATE TABLE IF NOT EXISTS user_progress (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -62,24 +65,21 @@ def init_db():
 
 
 def sync_words(words: List[Tuple]) -> int:
-    """
-    Each item: (english, russian, example, card_type, past_simple, past_participle)
-    card_type: 'word' | 'verb'
-    """
+    """Each item: (english, russian, transcription, example, card_type, past_simple, past_participle)"""
     conn = _conn()
     c = conn.cursor()
     new_count = 0
-    for row in words:
-        english, russian, example, card_type, past_simple, past_participle = row
+    for english, russian, transcription, example, card_type, past_simple, past_participle in words:
         c.execute(
             """
             INSERT OR IGNORE INTO words
-                (english, russian, example, card_type, past_simple, past_participle)
-            VALUES (?, ?, ?, ?, ?, ?)
+                (english, russian, transcription, example, card_type, past_simple, past_participle)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 english.strip(),
                 russian.strip(),
+                transcription.strip() if transcription else None,
                 example.strip() if example else None,
                 card_type,
                 past_simple.strip() if past_simple else None,
@@ -99,7 +99,8 @@ def get_due_cards(user_id: int, card_type: str, limit: int = 1) -> List[Tuple]:
     c = conn.cursor()
     c.execute(
         """
-        SELECT w.id, w.english, w.russian, w.example, w.past_simple, w.past_participle
+        SELECT w.id, w.english, w.russian, w.transcription, w.example,
+               w.past_simple, w.past_participle
         FROM words w
         LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
         WHERE w.card_type = ?
@@ -115,6 +116,19 @@ def get_due_cards(user_id: int, card_type: str, limit: int = 1) -> List[Tuple]:
     result = c.fetchall()
     conn.close()
     return result
+
+
+def get_random_options(word_id: int, card_type: str, field: str, count: int = 2) -> List[str]:
+    """Return `count` random values of `field` from words of same type, excluding word_id."""
+    conn = _conn()
+    c = conn.cursor()
+    c.execute(
+        f"SELECT {field} FROM words WHERE card_type = ? AND id != ? AND {field} IS NOT NULL",
+        (card_type, word_id),
+    )
+    rows = [r[0] for r in c.fetchall()]
+    conn.close()
+    return random.sample(rows, min(count, len(rows)))
 
 
 def get_or_create_progress(user_id: int, word_id: int) -> Dict:
@@ -135,15 +149,7 @@ def get_or_create_progress(user_id: int, word_id: int) -> Dict:
     return {"ease_factor": row[0], "interval": row[1], "repetitions": row[2]}
 
 
-def update_progress(
-    user_id: int,
-    word_id: int,
-    ease_factor: float,
-    interval: int,
-    repetitions: int,
-    next_review: str,
-    correct: int,
-):
+def update_progress(user_id, word_id, ease_factor, interval, repetitions, next_review, correct):
     conn = _conn()
     c = conn.cursor()
     c.execute(
@@ -158,53 +164,14 @@ def update_progress(
             correct_reviews = correct_reviews + ?
         WHERE user_id = ? AND word_id = ?
         """,
-        (
-            ease_factor,
-            interval,
-            repetitions,
-            next_review,
-            datetime.now().isoformat(),
-            correct,
-            user_id,
-            word_id,
-        ),
+        (ease_factor, interval, repetitions, next_review,
+         datetime.now().isoformat(), correct, user_id, word_id),
     )
     conn.commit()
     conn.close()
 
 
-def get_user_stats(user_id: int) -> Dict:
-    conn = _conn()
-    c = conn.cursor()
-    c.execute(
-        """
-        SELECT
-            w.card_type,
-            COUNT(DISTINCT w.id)                                        AS total,
-            COUNT(CASE WHEN COALESCE(up.correct_reviews,0) >= ? THEN 1 END) AS learned,
-            COALESCE(SUM(up.total_reviews), 0),
-            COALESCE(SUM(up.correct_reviews), 0)
-        FROM words w
-        LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
-        GROUP BY w.card_type
-        """,
-        (LEARNED_THRESHOLD, user_id),
-    )
-    rows = c.fetchall()
-    conn.close()
-    result = {}
-    for card_type, total, learned, total_reviews, correct_reviews in rows:
-        result[card_type] = {
-            "total": total,
-            "learned": learned,
-            "total_reviews": total_reviews,
-            "correct_reviews": correct_reviews,
-        }
-    return result
-
-
 def get_card_counts(user_id: int) -> Dict:
-    """Returns due count per card_type for today."""
     today = date.today().isoformat()
     conn = _conn()
     c = conn.cursor()
@@ -221,4 +188,29 @@ def get_card_counts(user_id: int) -> Dict:
     )
     rows = c.fetchall()
     conn.close()
-    return {card_type: count for card_type, count in rows}
+    return {ct: n for ct, n in rows}
+
+
+def get_user_stats(user_id: int) -> Dict:
+    conn = _conn()
+    c = conn.cursor()
+    c.execute(
+        """
+        SELECT w.card_type,
+               COUNT(DISTINCT w.id),
+               COUNT(CASE WHEN COALESCE(up.correct_reviews,0) >= ? THEN 1 END),
+               COALESCE(SUM(up.total_reviews), 0),
+               COALESCE(SUM(up.correct_reviews), 0)
+        FROM words w
+        LEFT JOIN user_progress up ON w.id = up.word_id AND up.user_id = ?
+        GROUP BY w.card_type
+        """,
+        (LEARNED_THRESHOLD, user_id),
+    )
+    rows = c.fetchall()
+    conn.close()
+    return {
+        ct: {"total": total, "learned": learned,
+             "total_reviews": tr, "correct_reviews": cr}
+        for ct, total, learned, tr, cr in rows
+    }
