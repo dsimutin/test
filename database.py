@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Dict, List, Optional, Tuple
 
 DB_PATH = os.environ.get("DB_PATH", "flashcards.db")
-LEARNED_THRESHOLD = 5
+LEARNED_THRESHOLD = 5  # correct answers to mark word as learned
 
 
 def _conn():
@@ -30,7 +30,7 @@ def init_db():
             past_participle TEXT
         )
     """)
-    # migration: add columns if they don't exist yet
+    # migrations
     existing = {row[1] for row in c.execute("PRAGMA table_info(words)")}
     for col, typedef in [
         ("transcription",   "TEXT"),
@@ -57,9 +57,15 @@ def init_db():
             last_review     TEXT,
             total_reviews   INTEGER DEFAULT 0,
             correct_reviews INTEGER DEFAULT 0,
+            learned_written INTEGER DEFAULT 0,
             UNIQUE(user_id, word_id)
         )
     """)
+    # migration: add learned_written if missing
+    existing_up = {row[1] for row in c.execute("PRAGMA table_info(user_progress)")}
+    if "learned_written" not in existing_up:
+        c.execute("ALTER TABLE user_progress ADD COLUMN learned_written INTEGER DEFAULT 0")
+
     conn.commit()
     conn.close()
 
@@ -118,8 +124,23 @@ def get_due_cards(user_id: int, card_type: str, limit: int = 1) -> List[Tuple]:
     return result
 
 
+def get_words_by_ids(word_ids: List[int]) -> List[Tuple]:
+    if not word_ids:
+        return []
+    conn = _conn()
+    c = conn.cursor()
+    placeholders = ",".join("?" * len(word_ids))
+    c.execute(
+        f"SELECT id, english, russian, transcription, past_simple, card_type "
+        f"FROM words WHERE id IN ({placeholders})",
+        word_ids,
+    )
+    result = c.fetchall()
+    conn.close()
+    return result
+
+
 def get_random_options(word_id: int, card_type: str, field: str, count: int = 2) -> List[str]:
-    """Return `count` random values of `field` from words of same type, excluding word_id."""
     conn = _conn()
     c = conn.cursor()
     c.execute(
@@ -140,16 +161,27 @@ def get_or_create_progress(user_id: int, word_id: int) -> Dict:
     )
     conn.commit()
     c.execute(
-        "SELECT ease_factor, interval, repetitions FROM user_progress "
-        "WHERE user_id = ? AND word_id = ?",
+        "SELECT ease_factor, interval, repetitions, correct_reviews, learned_written "
+        "FROM user_progress WHERE user_id = ? AND word_id = ?",
         (user_id, word_id),
     )
     row = c.fetchone()
     conn.close()
-    return {"ease_factor": row[0], "interval": row[1], "repetitions": row[2]}
+    return {
+        "ease_factor": row[0],
+        "interval": row[1],
+        "repetitions": row[2],
+        "correct_reviews": row[3],
+        "learned_written": row[4],
+    }
 
 
-def update_progress(user_id, word_id, ease_factor, interval, repetitions, next_review, correct):
+def update_progress(
+    user_id: int, word_id: int,
+    ease_factor: float, interval: int, repetitions: int,
+    next_review: str, correct: int,
+) -> bool:
+    """Returns True if this update caused the word to become learned for the first time."""
     conn = _conn()
     c = conn.cursor()
     c.execute(
@@ -167,8 +199,26 @@ def update_progress(user_id, word_id, ease_factor, interval, repetitions, next_r
         (ease_factor, interval, repetitions, next_review,
          datetime.now().isoformat(), correct, user_id, word_id),
     )
+    # Check if just crossed learned threshold for the first time
+    c.execute(
+        "SELECT correct_reviews, learned_written FROM user_progress "
+        "WHERE user_id = ? AND word_id = ?",
+        (user_id, word_id),
+    )
+    row = c.fetchone()
+    just_learned = (
+        row is not None
+        and row[0] >= LEARNED_THRESHOLD
+        and row[1] == 0
+    )
+    if just_learned:
+        c.execute(
+            "UPDATE user_progress SET learned_written = 1 WHERE user_id = ? AND word_id = ?",
+            (user_id, word_id),
+        )
     conn.commit()
     conn.close()
+    return just_learned
 
 
 def get_card_counts(user_id: int) -> Dict:

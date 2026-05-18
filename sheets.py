@@ -1,11 +1,16 @@
 import json
 import os
+from datetime import date
 from typing import List, Tuple
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+# Need write access to update progress sheet
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+
+PROGRESS_SHEET_NAME = "Прогресс учеников"
+PROGRESS_HEADERS = ["Дата", "Ученик", "Telegram ID", "Слово / Глагол", "Тип", "Правильных ответов"]
 
 
 def _get_creds() -> Credentials:
@@ -24,6 +29,15 @@ def _get_creds() -> Credentials:
     return Credentials.from_service_account_file(raw, scopes=SCOPES)
 
 
+def _open_spreadsheet():
+    client = gspread.authorize(_get_creds())
+    spreadsheet_id = os.environ.get("SPREADSHEET_ID")
+    sheet_name = os.environ.get("SHEET_NAME", "vocabulary")
+    if spreadsheet_id:
+        return client.open_by_key(spreadsheet_id)
+    return client.open(sheet_name)
+
+
 def _col(header: List[str], *names) -> int | None:
     for name in names:
         for i, h in enumerate(header):
@@ -39,45 +53,47 @@ def _val(row: List[str], idx: int | None) -> str | None:
     return v or None
 
 
+def _is_verb_sheet(ws, header: List[str]) -> bool:
+    """Detect verb sheet by title or by presence of past-simple column."""
+    title = ws.title.lower()
+    if any(k in title for k in ("глагол", "verb", "irregular")):
+        return True
+    return _col(header, "past simple", "past_simple", "прошедшее", "v2") is not None
+
+
 def fetch_vocabulary() -> List[Tuple]:
     """
     Returns list of:
       (english, russian, transcription, example, card_type, past_simple, past_participle)
 
-    Sheet 1 — words:
-      columns: word/слово | translation/перевод | transcription/транскрипция | example/пример
+    Sheet "Слова" (or first sheet):
+      word/слово | translation/перевод | transcription/транскрипция | example/пример
 
-    Sheet 2 — irregular verbs:
-      columns: infinitive/инфинитив/v1 | translation/перевод |
-               past simple/v2 | past participle/v3
+    Sheet "Глаголы" (or second sheet):
+      infinitive/глагол/v1 | translation/перевод | past simple/v2 | past participle/v3
     """
-    spreadsheet_id = os.environ.get("SPREADSHEET_ID")
-    sheet_name = os.environ.get("SHEET_NAME", "vocabulary")
-
-    client = gspread.authorize(_get_creds())
-    spreadsheet = client.open_by_key(spreadsheet_id) if spreadsheet_id else client.open(sheet_name)
-
+    spreadsheet = _open_spreadsheet()
     result = []
     seen_words = set()
     seen_verbs = set()
 
-    for idx, ws in enumerate(spreadsheet.worksheets()):
+    for ws in spreadsheet.worksheets():
+        # Skip the progress sheet
+        if ws.title == PROGRESS_SHEET_NAME:
+            continue
+
         rows = ws.get_all_values()
         if not rows:
             continue
         header = [h.strip().lower() for h in rows[0]]
 
-        # Detect verb sheet by presence of past-simple column or by sheet index
-        is_verb_sheet = (
-            _col(header, "past simple", "past_simple", "прошедшее", "v2") is not None
-            or idx == 1
-        )
-
-        if is_verb_sheet:
-            inf_col = _col(header, "infinitive", "инфинитив", "word", "слово", "v1", "english")
+        if _is_verb_sheet(ws, header):
+            inf_col = _col(header,
+                "infinitive", "инфинитив", "глагол", "word", "слово", "v1", "english")
             rus_col = _col(header, "translation", "перевод", "russian")
             ps_col  = _col(header, "past simple", "past_simple", "прошедшее", "v2")
-            pp_col  = _col(header, "past participle", "past_participle", "причастие", "v3")
+            pp_col  = _col(header,
+                "past participle", "past_participle", "причастие", "v3")
 
             if inf_col is None or rus_col is None:
                 continue
@@ -115,3 +131,36 @@ def fetch_vocabulary() -> List[Tuple]:
                 ))
 
     return result
+
+
+def write_learned_word(user_name: str, user_id: int, word: str, card_type: str, correct: int):
+    """Append a row to the progress sheet when a word is learned."""
+    try:
+        spreadsheet = _open_spreadsheet()
+
+        # Get or create progress sheet
+        titles = [ws.title for ws in spreadsheet.worksheets()]
+        if PROGRESS_SHEET_NAME not in titles:
+            ws = spreadsheet.add_worksheet(
+                title=PROGRESS_SHEET_NAME, rows=1000, cols=len(PROGRESS_HEADERS)
+            )
+            ws.append_row(PROGRESS_HEADERS)
+        else:
+            ws = spreadsheet.worksheet(PROGRESS_SHEET_NAME)
+
+        type_label = "Слово" if card_type == "word" else "Глагол"
+        ws.append_row([
+            date.today().strftime("%d.%m.%Y"),
+            user_name,
+            str(user_id),
+            word,
+            type_label,
+            str(correct),
+        ])
+    except Exception:
+        logger.warning("Failed to write progress to sheets", exc_info=True)
+
+
+# Logger for this module
+import logging
+logger = logging.getLogger(__name__)
