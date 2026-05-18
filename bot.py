@@ -57,35 +57,32 @@ H = html.escape  # shorthand
 # ── card text builders (HTML) ──────────────────────────────────────────────────
 
 def _word_card_text(english, russian, transcription, example) -> str:
-    parts = [
-        f"📖  <code>{H(english)}</code>",
-    ]
+    parts = [f"📖  <code>{H(english)}</code>"]
     if transcription:
-        parts.append(f"🔤  <i>{H(transcription)}</i>")
+        parts.append(f"<i>{H(transcription)}</i>")
     parts.append("")
     parts.append(f"🇷🇺  <b>{H(russian)}</b>")
     if example:
-        parts.append(f"\n💬  <i>{H(example)}</i>")
+        parts.append(f"\n<i>{H(example)}</i>")
     return "\n".join(parts)
 
 
 def _verb_card_text(infinitive, russian, past_simple, past_participle) -> str:
-    ps = H(past_simple)  if past_simple  else "—"
+    ps = H(past_simple) if past_simple else "—"
     pp = H(past_participle) if past_participle else "—"
     return (
-        f"⚡  <b>Неправильный глагол</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"<b>V1</b>  <code>{H(infinitive)}</code>  —  <i>{H(russian)}</i>\n"
-        f"<b>V2</b>  <code>{ps}</code>\n"
-        f"<b>V3</b>  <code>{pp}</code>"
+        f"⚡ <b>Неправильный глагол</b>\n\n"
+        f"<code>{H(infinitive)}</code>\n"
+        f"<i>{H(russian)}</i>\n\n"
+        f"<b>Past Simple</b>      <code>{ps}</code>\n"
+        f"<b>Past Participle</b>  <code>{pp}</code>"
     )
 
 
 def _quiz_word_text(english, transcription, q_num, q_total) -> str:
-    sub = f"\n🔤  <i>{H(transcription)}</i>" if transcription else ""
+    sub = f"\n<i>{H(transcription)}</i>" if transcription else ""
     return (
-        f"🎯  <b>Вопрос {q_num} из {q_total}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
+        f"🎯 <b>Вопрос {q_num} из {q_total}</b>\n\n"
         f"Переведи слово:\n\n"
         f"<code>{H(english)}</code>{sub}"
     )
@@ -93,9 +90,8 @@ def _quiz_word_text(english, transcription, q_num, q_total) -> str:
 
 def _quiz_verb_text(infinitive, russian, q_num, q_total) -> str:
     return (
-        f"🎯  <b>Вопрос {q_num} из {q_total}</b>\n"
-        f"━━━━━━━━━━━━━━━━━━\n\n"
-        f"Выбери <b>Past Simple (V2)</b>:\n\n"
+        f"🎯 <b>Вопрос {q_num} из {q_total}</b>\n\n"
+        f"Выбери <b>Past Simple</b>:\n\n"
         f"<code>{H(infinitive)}</code>  —  <i>{H(russian)}</i>"
     )
 
