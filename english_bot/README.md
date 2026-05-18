@@ -143,8 +143,33 @@ async def main():
 asyncio.run(main())
 ```
 
-## Деплой
+## Деплой на Railway (через Docker)
 
-Production-ready: `python -m bot.main` + любой supervisor (systemd,
-docker, Railway). Для Railway: `playwright install chromium` нужно
-выполнить в build step.
+В проекте есть `Dockerfile` на базе официального образа Playwright —
+Chromium и все системные зависимости уже внутри, никаких проблем с
+`libasound2` на Ubuntu 24.04.
+
+1. В Railway создай **новый сервис** (или поменяй существующий) и подключи
+   этот репо.
+2. **Root Directory**: `english_bot` (Settings → Source).
+3. Railway автоматически найдёт `Dockerfile` и `railway.toml`.
+4. В **Variables** добавь:
+   - `BOT_TOKEN`
+   - `SPREADSHEET_ID`
+   - `GOOGLE_CREDENTIALS_JSON` — вставь весь JSON service-account целиком
+5. (Опционально) добавь **Volume** на `/app/data` чтобы SQLite и кеш
+   карточек выживали между деплоями.
+6. **Replicas = 1** (иначе два бота будут драться за `getUpdates`).
+7. Если у тебя уже крутится старый бот в этом же репо — поставь его на
+   паузу, иначе два бота с одним токеном конфликтуют.
+
+## Локальный Docker
+
+```bash
+docker build -t english-bot ./english_bot
+docker run --rm \
+  -e BOT_TOKEN=xxx -e SPREADSHEET_ID=xxx \
+  -e GOOGLE_CREDENTIALS_JSON="$(cat credentials.json)" \
+  -v $(pwd)/data:/app/data \
+  english-bot
+```

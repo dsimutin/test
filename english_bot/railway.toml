@@ -1,0 +1,8 @@
+[build]
+builder = "dockerfile"
+dockerfilePath = "Dockerfile"
+
+[deploy]
+startCommand = "python -m bot.main"
+restartPolicyType = "always"
+restartPolicyMaxRetries = 10
