@@ -23,6 +23,7 @@ from .handlers import verbs as verbs_router
 from .handlers import vocabulary as vocab_router
 from .services import card_renderer
 from .services.sheets import sync_from_sheets
+from .services.snapshot import dump_to_sheets, restore_from_sheets
 from .storage import db
 
 logging.basicConfig(
@@ -31,22 +32,47 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-SYNC_INTERVAL_SECONDS = 30 * 60   # 30 min
+SYNC_INTERVAL_SECONDS     = 30 * 60   # 30 min — refresh content from sheets
+SNAPSHOT_INTERVAL_SECONDS = 5 * 60    # 5 min  — back up progress to sheets
 
 
 async def _safe_sync(cfg: Config, tag: str) -> None:
     try:
         nv, nb = await sync_from_sheets(cfg)
-        logger.info("[%s] sync ok: %d vocab, %d verbs", tag, nv, nb)
+        logger.info("[%s] content sync: %d vocab, %d verbs", tag, nv, nb)
     except Exception as e:
-        logger.warning("[%s] sync failed: %s", tag, e)
+        logger.warning("[%s] content sync failed: %s", tag, e)
 
 
-async def _background_sync_loop(cfg: Config) -> None:
-    """Wakes every SYNC_INTERVAL_SECONDS, calls sync_from_sheets."""
+async def _safe_snapshot(cfg: Config, tag: str) -> None:
+    try:
+        await dump_to_sheets(cfg)
+        logger.info("[%s] progress snapshot pushed", tag)
+    except Exception as e:
+        logger.warning("[%s] progress snapshot failed: %s", tag, e)
+
+
+async def _safe_restore(cfg: Config) -> None:
+    if not await db.is_progress_empty():
+        logger.info("SQLite already has progress data, skipping restore")
+        return
+    try:
+        result = await restore_from_sheets(cfg)
+        logger.info("Restored from sheets: %s", result)
+    except Exception as e:
+        logger.warning("Restore from sheets failed: %s", e)
+
+
+async def _content_sync_loop(cfg: Config) -> None:
     while True:
         await asyncio.sleep(SYNC_INTERVAL_SECONDS)
         await _safe_sync(cfg, tag="bg")
+
+
+async def _snapshot_loop(cfg: Config) -> None:
+    while True:
+        await asyncio.sleep(SNAPSHOT_INTERVAL_SECONDS)
+        await _safe_snapshot(cfg, tag="bg")
 
 
 async def main() -> None:
@@ -57,8 +83,11 @@ async def main() -> None:
 
     await card_renderer.startup()
 
-    # Initial sync on startup — keep DB fresh on every redeploy
+    # Step 1: pull fresh content from the user's sheets
     await _safe_sync(cfg, tag="startup")
+    # Step 2: if SQLite is empty (fresh container) — restore progress from
+    #         the snapshot sheets so a redeploy doesn't wipe student data.
+    await _safe_restore(cfg)
 
     bot = Bot(
         token=cfg.bot_token,
@@ -67,7 +96,6 @@ async def main() -> None:
     dp = Dispatcher(storage=MemoryStorage())
     dp["cfg"] = cfg
 
-    # Register every user on first interaction, even if they skip /start
     dp.message.outer_middleware(EnsureUserMiddleware())
     dp.callback_query.outer_middleware(EnsureUserMiddleware())
 
@@ -79,14 +107,19 @@ async def main() -> None:
     dp.include_router(verbs_router.router)
     dp.include_router(quiz_router.router)
 
-    bg_task = asyncio.create_task(_background_sync_loop(cfg),
-                                   name="bg-sync")
+    sync_task = asyncio.create_task(_content_sync_loop(cfg),
+                                     name="bg-sync")
+    snap_task = asyncio.create_task(_snapshot_loop(cfg),
+                                     name="bg-snapshot")
 
     logger.info("Bot starting…")
     try:
         await dp.start_polling(bot, cfg=cfg)
     finally:
-        bg_task.cancel()
+        sync_task.cancel()
+        snap_task.cancel()
+        # final best-effort snapshot before container dies
+        await _safe_snapshot(cfg, tag="shutdown")
         await card_renderer.shutdown()
         await bot.session.close()
 

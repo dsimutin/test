@@ -22,7 +22,8 @@ from ..storage.models import VerbItem, VocabularyItem
 
 logger = logging.getLogger(__name__)
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+# Full spreadsheets scope — we also write a progress snapshot back.
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 
 # Sheet name detection ───────────────────────────────────────────────────
 VOCAB_SHEET_NAMES = ("vocabulary", "словарь", "words", "слова")

@@ -9,6 +9,7 @@ BTN_STATS = "📊 Моя статистика"
 BTN_STUDENTS = "👥 Ученики"
 BTN_SYNC     = "🔄 Синхронизация"
 BTN_EXPORT   = "📋 Экспорт CSV"
+BTN_BACKUP   = "💾 Бэкап сейчас"
 
 
 def main_menu(is_teacher: bool) -> ReplyKeyboardMarkup:
@@ -21,6 +22,7 @@ def main_menu(is_teacher: bool) -> ReplyKeyboardMarkup:
         rows[1].append(KeyboardButton(text=BTN_STUDENTS))
         rows.append([KeyboardButton(text=BTN_SYNC),
                      KeyboardButton(text=BTN_EXPORT)])
+        rows.append([KeyboardButton(text=BTN_BACKUP)])
     return ReplyKeyboardMarkup(
         keyboard=rows,
         resize_keyboard=True,

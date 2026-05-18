@@ -17,8 +17,9 @@ from aiogram.types import (
 )
 
 from ..config import Config
-from ..keyboards.reply import BTN_EXPORT, BTN_STUDENTS
+from ..keyboards.reply import BTN_BACKUP, BTN_EXPORT, BTN_STUDENTS
 from ..services.exporter import build_progress_csv
+from ..services.snapshot import dump_to_sheets
 from ..storage import db
 
 router = Router(name="teacher")
@@ -233,3 +234,24 @@ async def on_export(msg: types.Message, cfg: Config) -> None:
             "Открой в Excel / Google Sheets (разделитель — точка с запятой)."
         ),
     )
+
+
+# ── manual backup ─────────────────────────────────────────────────────────
+
+@router.message(F.text == BTN_BACKUP)
+@router.message(Command("backup"))
+async def on_backup(msg: types.Message, cfg: Config) -> None:
+    if not _is_teacher(msg, cfg):
+        await msg.answer("⛔ Команда только для преподавателя.")
+        return
+    await msg.answer("⏳ Сохраняю снапшот в Google Sheets…")
+    try:
+        await dump_to_sheets(cfg)
+        await msg.answer(
+            "✅ Снапшот сохранён в листах "
+            "<code>_users</code>, <code>_progress</code>, "
+            "<code>_sessions</code>.\n\n"
+            "<i>Автоматически делается каждые 5 минут и при перезапуске.</i>"
+        )
+    except Exception as e:
+        await msg.answer(f"❌ Не удалось: <code>{e}</code>")

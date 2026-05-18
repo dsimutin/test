@@ -512,6 +512,103 @@ async def student_detail(telegram_id: int) -> dict | None:
     }
 
 
+async def is_progress_empty() -> bool:
+    """True if there is no per-user data at all (fresh container)."""
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM users LIMIT 1) "
+            "+ EXISTS(SELECT 1 FROM vocabulary_progress LIMIT 1) "
+            "+ EXISTS(SELECT 1 FROM verb_progress LIMIT 1)"
+        )
+        row = await cur.fetchone()
+    return (row[0] or 0) == 0
+
+
+async def dump_users() -> list[tuple]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, username, first_name, created_at FROM users"
+        )
+        return await cur.fetchall()
+
+
+async def dump_vocab_progress() -> list[tuple]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, word_id, status, correct_count, wrong_count, "
+            "last_seen_at, next_review_at FROM vocabulary_progress"
+        )
+        return await cur.fetchall()
+
+
+async def dump_verb_progress() -> list[tuple]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, verb_id, status, correct_count, wrong_count, "
+            "past_simple_errors, past_participle_errors, "
+            "last_seen_at, next_review_at FROM verb_progress"
+        )
+        return await cur.fetchall()
+
+
+async def dump_sessions() -> list[tuple]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, mode, started_at, finished_at, total_items, "
+            "correct_answers, wrong_answers FROM sessions"
+        )
+        return await cur.fetchall()
+
+
+async def restore_users(rows: list[tuple]) -> None:
+    if not rows:
+        return
+    async with connect() as conn:
+        await conn.executemany(
+            "INSERT OR IGNORE INTO users "
+            "(telegram_id, username, first_name, created_at) "
+            "VALUES (?, ?, ?, ?)", rows,
+        )
+        await conn.commit()
+
+
+async def restore_vocab_progress(rows: list[tuple]) -> None:
+    if not rows:
+        return
+    async with connect() as conn:
+        await conn.executemany(
+            "INSERT OR REPLACE INTO vocabulary_progress "
+            "(telegram_id, word_id, status, correct_count, wrong_count, "
+            "last_seen_at, next_review_at) VALUES (?,?,?,?,?,?,?)", rows,
+        )
+        await conn.commit()
+
+
+async def restore_verb_progress(rows: list[tuple]) -> None:
+    if not rows:
+        return
+    async with connect() as conn:
+        await conn.executemany(
+            "INSERT OR REPLACE INTO verb_progress "
+            "(telegram_id, verb_id, status, correct_count, wrong_count, "
+            "past_simple_errors, past_participle_errors, "
+            "last_seen_at, next_review_at) VALUES (?,?,?,?,?,?,?,?,?)", rows,
+        )
+        await conn.commit()
+
+
+async def restore_sessions(rows: list[tuple]) -> None:
+    if not rows:
+        return
+    async with connect() as conn:
+        await conn.executemany(
+            "INSERT INTO sessions "
+            "(telegram_id, mode, started_at, finished_at, total_items, "
+            "correct_answers, wrong_answers) VALUES (?,?,?,?,?,?,?)", rows,
+        )
+        await conn.commit()
+
+
 async def export_all_progress() -> tuple[list[dict], list[dict]]:
     """Returns (vocab_rows, verb_rows) for CSV export."""
     async with connect() as conn:
