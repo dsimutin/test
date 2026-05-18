@@ -11,6 +11,9 @@ def _conn():
 
 
 def init_db():
+    parent = os.path.dirname(DB_PATH)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     conn = _conn()
     c = conn.cursor()
     c.execute("""
