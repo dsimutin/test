@@ -1,22 +1,22 @@
 """Shared session helpers used by both vocabulary and verb handlers.
 
 The FSM `state` holds:
-    mode          : 'vocab' | 'verb'
-    item_ids      : list[str]
-    idx           : int   — index of current card
-    session_id    : int   — sessions.id
-    quiz          : list[Question dicts]
-    q_idx         : int
-    correct       : int
-    wrong         : int
+    mode            : 'vocab' | 'verb'
+    item_ids        : list[str]
+    idx             : int        — index of current card
+    session_id      : int        — sessions.id
+    quiz            : list[Question dicts]
+    q_idx           : int
+    correct         : int
+    wrong           : int
+    sent_card_ids   : list[int]  — bot message_ids of cards shown
+    sent_quiz_ids   : list[int]  — bot message_ids of quiz Q/A msgs
 """
 from __future__ import annotations
 
-from dataclasses import asdict
-from pathlib import Path
-from typing import Any
+import logging
 
-from aiogram import types
+from aiogram import Bot, types
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
 
@@ -27,10 +27,45 @@ from ..services.quiz import Question
 from ..storage import db
 from .states import StudyStates
 
+logger = logging.getLogger(__name__)
+
+
+# ── message history tracking ──────────────────────────────────────────────
+
+async def _track(state: FSMContext, key: str, message_id: int) -> None:
+    data = await state.get_data()
+    ids = list(data.get(key) or [])
+    ids.append(message_id)
+    await state.update_data(**{key: ids})
+
+
+async def _delete_tracked(bot: Bot, chat_id: int, state: FSMContext,
+                          keys: list[str]) -> None:
+    """Try to delete every tracked bot message under `keys` and reset them."""
+    data = await state.get_data()
+    update: dict = {}
+    for key in keys:
+        ids = data.get(key) or []
+        for mid in ids:
+            try:
+                await bot.delete_message(chat_id, mid)
+            except Exception as e:
+                logger.debug("delete_message failed for %s: %s", mid, e)
+        update[key] = []
+    if update:
+        await state.update_data(**update)
+
+
+async def clear_all_history(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Public: wipe both card and quiz history for this user."""
+    await _delete_tracked(bot, chat_id, state,
+                           keys=["sent_card_ids", "sent_quiz_ids"])
+
 
 # ── card flow ─────────────────────────────────────────────────────────────
 
-async def show_next_card(msg: types.Message, state: FSMContext, cfg: Config) -> None:
+async def show_next_card(msg: types.Message, state: FSMContext,
+                          cfg: Config) -> None:
     data = await state.get_data()
     mode = data["mode"]
     idx  = data["idx"]
@@ -44,7 +79,8 @@ async def show_next_card(msg: types.Message, state: FSMContext, cfg: Config) -> 
     if mode == "vocab":
         items = await db.get_vocabulary_by_ids([ids[idx]])
         if not items:
-            await msg.answer("⚠️ Слово не найдено, пропускаю.")
+            warn = await msg.answer("⚠️ Слово не найдено, пропускаю.")
+            await _track(state, "sent_card_ids", warn.message_id)
             await state.update_data(idx=idx + 1)
             await show_next_card(msg, state, cfg)
             return
@@ -52,16 +88,18 @@ async def show_next_card(msg: types.Message, state: FSMContext, cfg: Config) -> 
     else:
         items = await db.get_verbs_by_ids([ids[idx]])
         if not items:
-            await msg.answer("⚠️ Глагол не найден, пропускаю.")
+            warn = await msg.answer("⚠️ Глагол не найден, пропускаю.")
+            await _track(state, "sent_card_ids", warn.message_id)
             await state.update_data(idx=idx + 1)
             await show_next_card(msg, state, cfg)
             return
         png = await card_renderer.render_irregular_card(items[0], number, cfg)
 
-    await msg.answer_photo(
+    sent = await msg.answer_photo(
         FSInputFile(png),
         reply_markup=card_buttons(mode, idx),
     )
+    await _track(state, "sent_card_ids", sent.message_id)
 
 
 async def handle_card_button(cb: types.CallbackQuery, state: FSMContext,
@@ -85,7 +123,6 @@ async def handle_card_button(cb: types.CallbackQuery, state: FSMContext,
     else:
         await progress.mark_verb_seen(cb.from_user.id, item_id, knew)
 
-    # Remove inline keyboard so user can't double-tap
     try:
         await cb.message.edit_reply_markup(reply_markup=None)
     except Exception:
@@ -98,7 +135,8 @@ async def handle_card_button(cb: types.CallbackQuery, state: FSMContext,
 
 # ── quiz flow ─────────────────────────────────────────────────────────────
 
-async def _start_quiz(msg: types.Message, state: FSMContext, cfg: Config) -> None:
+async def _start_quiz(msg: types.Message, state: FSMContext,
+                       cfg: Config) -> None:
     data = await state.get_data()
     mode = data["mode"]
     ids = data["item_ids"]
@@ -117,7 +155,14 @@ async def _start_quiz(msg: types.Message, state: FSMContext, cfg: Config) -> Non
         await state.clear()
         return
 
-    await msg.answer(intro)
+    # 🔒 Anti-cheat: wipe card messages so user can't scroll up
+    # and peek during the test.
+    await _delete_tracked(msg.bot, msg.chat.id, state,
+                           keys=["sent_card_ids"])
+
+    sent = await msg.answer(intro)
+    await _track(state, "sent_quiz_ids", sent.message_id)
+
     await state.set_state(StudyStates.in_quiz)
     await state.update_data(
         quiz=[_q_to_dict(q) for q in questions],
@@ -143,14 +188,15 @@ async def _ask_question(msg: types.Message, state: FSMContext) -> None:
         return
     q = quiz_list[qi]
     progress_str = f"<b>{qi + 1} / {len(quiz_list)}</b>\n\n"
-    await msg.answer(
+    sent = await msg.answer(
         progress_str + f"{q['prompt']}",
-        parse_mode="HTML",
         reply_markup=quiz_options_keyboard(qi, q["options"]),
     )
+    await _track(state, "sent_quiz_ids", sent.message_id)
 
 
-async def handle_quiz_answer(cb: types.CallbackQuery, state: FSMContext) -> None:
+async def handle_quiz_answer(cb: types.CallbackQuery,
+                              state: FSMContext) -> None:
     """callback_data: quiz:{qidx}:{answer_idx}"""
     parts = cb.data.split(":")
     if len(parts) != 3:
@@ -170,7 +216,6 @@ async def handle_quiz_answer(cb: types.CallbackQuery, state: FSMContext) -> None
     meta = q["meta"]
     mode = data["mode"]
 
-    # persist
     if mode == "vocab":
         await progress.record_vocab_answer(cb.from_user.id, q["item_id"], correct)
         right_text = f"{meta['word']} — {meta['translation']}"
@@ -186,10 +231,12 @@ async def handle_quiz_answer(cb: types.CallbackQuery, state: FSMContext) -> None
         pass
 
     if correct:
-        await cb.message.answer("✅ Верно")
+        resp = await cb.message.answer("✅ Верно")
     else:
-        await cb.message.answer(f"❌ Не совсем. Правильно: <b>{right_text}</b>",
-                                 parse_mode="HTML")
+        resp = await cb.message.answer(
+            f"❌ Не совсем. Правильно: <b>{right_text}</b>"
+        )
+    await _track(state, "sent_quiz_ids", resp.message_id)
 
     await cb.answer()
     new_correct = data.get("correct", 0) + (1 if correct else 0)
@@ -213,11 +260,16 @@ async def _finish_quiz(msg: types.Message, state: FSMContext) -> None:
         data["session_id"], total=total,
         correct=correct, wrong=wrong,
     )
+    # Keep the summary message in chat; clear earlier quiz Q/A so the
+    # student can't review which were marked wrong (they'll see those
+    # words again next session anyway).
+    await _delete_tracked(msg.bot, msg.chat.id, state,
+                           keys=["sent_quiz_ids"])
+
     await msg.answer(
         f"🏁 Готово!\n\n"
         f"Правильно: <b>{correct} / {total}</b>  ({pct}%)\n"
         f"Ошибок: <b>{wrong}</b>\n\n"
-        f"Слова с ошибками вернутся в повторение.",
-        parse_mode="HTML",
+        f"Слова с ошибками вернутся в повторение."
     )
     await state.clear()

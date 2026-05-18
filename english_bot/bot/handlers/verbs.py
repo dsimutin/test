@@ -1,4 +1,4 @@
-from aiogram import F, Router, types
+from aiogram import Bot, F, Router, types
 from aiogram.fsm.context import FSMContext
 
 from ..config import Config
@@ -13,12 +13,14 @@ router = Router(name="verbs")
 
 @router.message(F.text == BTN_VERBS)
 async def on_start_verbs(msg: types.Message, state: FSMContext,
-                          cfg: Config) -> None:
+                          cfg: Config, bot: Bot) -> None:
+    await _session.clear_all_history(bot, msg.chat.id, state)
     await state.clear()
+
     ids = await selection.pick_verb_ids(msg.from_user.id,
                                         cfg.verb_batch_size)
     if not ids:
-        await msg.answer("Пока нет глаголов для изучения. Нажми 🔄 Синхронизировать.")
+        await msg.answer("Пока нет глаголов для изучения. Загляни попозже 🙂")
         return
 
     session_id = await db.start_session(msg.from_user.id, mode="verb")
@@ -26,8 +28,12 @@ async def on_start_verbs(msg: types.Message, state: FSMContext,
     await state.update_data(
         mode="verb", item_ids=ids, idx=0,
         session_id=session_id,
+        sent_card_ids=[], sent_quiz_ids=[],
     )
-    await msg.answer(f"⚡ Учим {len(ids)} глаголов.")
+    intro = await msg.answer(f"⚡ Учим {len(ids)} глаголов.")
+    await state.update_data(
+        sent_card_ids=[intro.message_id],
+    )
     await _session.show_next_card(msg, state, cfg)
 
 
