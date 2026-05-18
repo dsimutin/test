@@ -1,40 +1,46 @@
-"""Renders flashcard images using Pillow."""
+"""
+Premium flashcard image renderer.
+Uses only RGB (no RGBA tricks) — fully reliable on all Pillow versions.
+Card: 760 × 1000 px, white bg, accent top stripe, rounded via mask.
+"""
 import io
 import logging
 import os
-import urllib.request
 
 from PIL import Image, ImageDraw, ImageFont
 
 logger = logging.getLogger(__name__)
 
-FONTS_DIR = os.path.join(os.path.dirname(__file__), "fonts")
-_REGULAR = os.path.join(FONTS_DIR, "NotoSans-Regular.ttf")
-_BOLD    = os.path.join(FONTS_DIR, "NotoSans-Bold.ttf")
+CW, CH   = 760, 1000
+RADIUS   = 36
+PAD      = 52
+LINE_CLR = (220, 225, 235)   # separator colour
 
-_NOTO_REGULAR_URL = (
-    "https://github.com/googlefonts/noto-fonts/raw/main/"
-    "hinted/ttf/NotoSans/NotoSans-Regular.ttf"
-)
-_NOTO_BOLD_URL = (
-    "https://github.com/googlefonts/noto-fonts/raw/main/"
-    "hinted/ttf/NotoSans/NotoSans-Bold.ttf"
-)
+FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
+_REGULAR  = os.path.join(FONTS_DIR, "NotoSans-Regular.ttf")
+_BOLD     = os.path.join(FONTS_DIR, "NotoSans-Bold.ttf")
 
 
-def _ensure_fonts():
-    os.makedirs(FONTS_DIR, exist_ok=True)
-    for path, url in [(_REGULAR, _NOTO_REGULAR_URL), (_BOLD, _NOTO_BOLD_URL)]:
-        if not os.path.exists(path):
-            logger.info("Downloading font: %s", url)
-            try:
-                urllib.request.urlretrieve(url, path)
-            except Exception as e:
-                logger.warning("Font download failed: %s", e)
+# ── colour helpers ─────────────────────────────────────────────────────────────
 
+def _hex(h: str) -> tuple:
+    h = h.lstrip("#")
+    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+
+
+def _tint(accent: str, alpha: float) -> tuple:
+    """Blend accent colour with white at given opacity (0-1)."""
+    r, g, b = _hex(accent)
+    return (
+        int(255 * (1 - alpha) + r * alpha),
+        int(255 * (1 - alpha) + g * alpha),
+        int(255 * (1 - alpha) + b * alpha),
+    )
+
+
+# ── font helpers ───────────────────────────────────────────────────────────────
 
 def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-    _ensure_fonts()
     path = _BOLD if bold else _REGULAR
     if os.path.exists(path):
         try:
@@ -44,27 +50,22 @@ def _font(size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.load_default()
 
 
-def _hex(h: str) -> tuple:
-    h = h.lstrip("#")
-    return tuple(int(h[i:i+2], 16) for i in (0, 2, 4))
+def _tw(text: str, font) -> int:
+    bb = font.getbbox(text)
+    return bb[2] - bb[0]
 
 
-def _gradient_bar(draw: ImageDraw, width: int, c1: str, c2: str, height: int = 6):
-    h1, h2 = _hex(c1), _hex(c2)
-    for x in range(width):
-        t = x / width
-        r = int(h1[0] + (h2[0] - h1[0]) * t)
-        g = int(h1[1] + (h2[1] - h1[1]) * t)
-        b = int(h1[2] + (h2[2] - h1[2]) * t)
-        draw.line([(x, 0), (x, height - 1)], fill=(r, g, b))
+def _th(font) -> int:
+    bb = font.getbbox("Ag")
+    return bb[3] - bb[1]
 
 
-def _wrap(text: str, font, max_width: int) -> list[str]:
+def _wrap(text: str, font, max_w: int) -> list[str]:
     words = text.split()
     lines, cur = [], ""
     for w in words:
         test = (cur + " " + w).strip()
-        if font.getlength(test) <= max_width:
+        if _tw(test, font) <= max_w:
             cur = test
         else:
             if cur:
@@ -75,127 +76,245 @@ def _wrap(text: str, font, max_width: int) -> list[str]:
     return lines
 
 
-# ── Word card ──────────────────────────────────────────────────────────────────
+# ── base image with rounded corners ───────────────────────────────────────────
+
+def _make_card() -> tuple[Image.Image, ImageDraw.ImageDraw]:
+    """White RGB card with subtle rounded-corner mask."""
+    img  = Image.new("RGB", (CW, CH), (255, 255, 255))
+    mask = Image.new("L",   (CW, CH), 0)
+    md   = ImageDraw.Draw(mask)
+    md.rounded_rectangle([0, 0, CW - 1, CH - 1], radius=RADIUS, fill=255)
+    # apply mask (white stays, corners go white on white — fine for Telegram)
+    bg   = Image.new("RGB", (CW, CH), (246, 244, 239))   # page bg
+    bg.paste(img, mask=mask)
+    draw = ImageDraw.Draw(bg)
+    # white card
+    draw.rounded_rectangle([0, 0, CW - 1, CH - 1], radius=RADIUS,
+                            fill=(255, 255, 255))
+    return bg, draw
+
+
+# ── shared drawing primitives ──────────────────────────────────────────────────
+
+def _accent_stripe(draw: ImageDraw, accent: str):
+    r, g, b = _hex(accent)
+    draw.rounded_rectangle([0, 0, CW - 1, RADIUS + 6],
+                            radius=RADIUS, fill=(r, g, b))
+    draw.rectangle([0, RADIUS, CW - 1, RADIUS + 6], fill=(r, g, b))
+
+
+def _pill(draw: ImageDraw, x: int, y: int, text: str,
+          font, accent: str, right: bool = False) -> int:
+    """Draw a rounded pill badge. Returns pill width."""
+    r, g, b = _hex(accent)
+    h = 40
+    tw_ = _tw(text, font)
+    hp  = 18
+    w   = tw_ + hp * 2
+    if right:
+        x = x - w
+    draw.rounded_rectangle([x, y, x + w, y + h],
+                            radius=12, fill=_tint(accent, 0.10))
+    draw.text((x + hp, y + 8), text, font=font, fill=(r, g, b))
+    return w
+
+
+def _separator(draw: ImageDraw, y: int):
+    draw.rectangle([PAD, y, CW - PAD, y + 1], fill=LINE_CLR)
+
+
+def _label_row(draw: ImageDraw, label: str, number: str, accent: str, y: int):
+    f = _font(20, bold=True)
+    _pill(draw, PAD, y, label, f, accent)
+    _pill(draw, CW - PAD, y, number, f, accent, right=True)
+
+
+def _example_block(draw: ImageDraw, example: str,
+                   highlight: str, accent: str, y: int) -> int:
+    """Tinted box with highlighted word. Returns bottom y."""
+    f_reg  = _font(27)
+    f_bold = _font(27, bold=True)
+    box_w  = CW - PAD * 2
+    inner  = box_w - 52
+    lines  = _wrap(example, f_reg, inner)
+    lh     = 40
+    box_h  = len(lines) * lh + 48
+
+    draw.rounded_rectangle([PAD, y, PAD + box_w, y + box_h],
+                            radius=20, fill=_tint(accent, 0.07))
+
+    # quotation mark
+    f_q = _font(54, bold=True)
+    draw.text((PAD + 18, y + 2), "“", font=f_q,
+              fill=_tint(accent, 0.25))
+
+    ty = y + 34
+    hl = highlight.lower()
+    r, g, b = _hex(accent)
+
+    for line in lines:
+        lo  = line.lower()
+        idx = lo.find(hl)
+        if idx == -1:
+            cx = PAD + (box_w - _tw(line, f_reg)) // 2
+            draw.text((cx, ty), line, font=f_reg, fill=(71, 85, 105))
+        else:
+            before = line[:idx]
+            mid    = line[idx:idx + len(highlight)]
+            after  = line[idx + len(highlight):]
+            total  = (_tw(before, f_reg) +
+                      _tw(mid,    f_bold) +
+                      _tw(after,  f_reg))
+            cx = PAD + (box_w - total) // 2
+            if before:
+                draw.text((cx, ty), before, font=f_reg,  fill=(71, 85, 105))
+                cx += _tw(before, f_reg)
+            draw.text((cx, ty), mid,    font=f_bold, fill=(r, g, b))
+            cx += _tw(mid, f_bold)
+            if after:
+                draw.text((cx, ty), after,  font=f_reg,  fill=(71, 85, 105))
+        ty += lh
+
+    return y + box_h
+
+
+def _to_bytes(img: Image.Image) -> io.BytesIO:
+    buf = io.BytesIO()
+    img.save(buf, format="PNG", optimize=True)
+    buf.seek(0)
+    return buf
+
+
+# ── Public: Vocabulary card ────────────────────────────────────────────────────
 
 def render_word_card(english: str, russian: str,
-                     transcription: str = "", example: str = "") -> io.BytesIO:
-    W, PAD = 640, 44
+                     transcription: str = "",
+                     example: str = "",
+                     number: str = "—",
+                     accent: str = "#2F7D5B") -> io.BytesIO:
 
-    # Measure content height
-    f_tag   = _font(11, bold=True)
-    f_word  = _font(48, bold=True)
-    f_tr    = _font(19)
-    f_ru    = _font(32, bold=True)
-    f_ex    = _font(18)
+    img, d = _make_card()
+    r, g, b = _hex(accent)
 
-    ex_lines = _wrap(example, f_ex, W - PAD * 2) if example else []
-    ex_lines = ex_lines[:2]
+    _accent_stripe(d, accent)
 
-    H = 40 + 8 + 16 + 56 + (28 if transcription else 0) + 16 + 1 + 20 + 44 + (len(ex_lines) * 26) + 36
-    H = max(H, 320)
+    y = 24
+    _label_row(d, "VOCABULARY", number, accent, y)
+    y += 72
 
-    img = Image.new("RGB", (W, H), "#FFFFFF")
-    d   = ImageDraw.Draw(img)
+    # Word
+    f_word = _font(72, bold=True)
+    d.text((PAD, y), english, font=f_word, fill=(10, 15, 30))
+    y += _th(f_word) + 14
 
-    # Gradient top bar
-    _gradient_bar(d, W, "#4A90D9", "#7EC8F0", height=6)
-
-    # Border
-    d.rectangle([0, 0, W - 1, H - 1], outline=_hex("#E2E8F0"), width=1)
-
-    y = 30
-
-    # Tag "СЛОВО"
-    d.text((PAD, y), "СЛОВО", font=f_tag, fill=_hex("#A0B4CC"))
-    y += 20
-
-    # English word
-    d.text((PAD, y), english, font=f_word, fill=_hex("#1A1A2E"))
-    y += 58
+    # Accent underline
+    d.rectangle([PAD, y, CW - PAD, y + 3], fill=_tint(accent, 0.40))
+    y += 22
 
     # Transcription
     if transcription:
-        d.text((PAD, y), transcription, font=f_tr, fill=_hex("#8A9BB0"))
-        y += 28
+        f_tr = _font(32)
+        d.text((PAD, y), transcription, font=f_tr, fill=(r, g, b))
+        y += _th(f_tr) + 20
 
-    # Separator
-    y += 12
-    d.line([(PAD, y), (W - PAD, y)], fill=_hex("#EDF0F4"), width=1)
-    y += 18
+    y += 8
+    _separator(d, y)
+    y += 30
 
-    # Russian
-    d.text((PAD, y), russian, font=f_ru, fill=_hex("#3B7DD8"))
-    y += 46
-
-    # Example
-    for line in ex_lines:
-        d.text((PAD, y), line, font=f_ex, fill=_hex("#9AA5B4"))
-        y += 26
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return buf
-
-
-# ── Verb card ──────────────────────────────────────────────────────────────────
-
-def render_verb_card(infinitive: str, russian: str,
-                     past_simple: str = "", past_participle: str = "") -> io.BytesIO:
-    W, PAD = 640, 44
-
-    f_tag   = _font(11, bold=True)
-    f_word  = _font(48, bold=True)
-    f_ru    = _font(19)
-    f_label = _font(11, bold=True)
-    f_form  = _font(30, bold=True)
-
-    H = 30 + 20 + 58 + 28 + 20 + 120 + 36
-    H = max(H, 340)
-
-    img = Image.new("RGB", (W, H), "#FFFFFF")
-    d   = ImageDraw.Draw(img)
-
-    # Gradient top bar (orange)
-    _gradient_bar(d, W, "#E8874A", "#F0B878", height=6)
-
-    # Border
-    d.rectangle([0, 0, W - 1, H - 1], outline=_hex("#E2E8F0"), width=1)
-
-    y = 30
-
-    # Tag
-    d.text((PAD, y), "НЕПРАВИЛЬНЫЙ ГЛАГОЛ", font=f_tag, fill=_hex("#C0A080"))
-    y += 20
-
-    # Infinitive
-    d.text((PAD, y), infinitive, font=f_word, fill=_hex("#1A1A2E"))
-    y += 58
-
-    # Translation
-    d.text((PAD, y), russian, font=f_ru, fill=_hex("#8A9BB0"))
+    # Translation (no emoji — PIL can't render flags)
+    f_ru_lbl = _font(18, bold=True)
+    d.text((PAD, y), "ПЕРЕВОД", font=f_ru_lbl, fill=_tint(accent, 0.55))
     y += 28
 
-    # Forms box
-    y += 16
-    box_h = 108
-    d.rectangle([PAD - 8, y, W - PAD + 8, y + box_h], fill=_hex("#F7F9FC"))
-    d.rectangle([PAD - 8, y, W - PAD + 8, y + box_h], outline=_hex("#E8ECF2"), width=1)
+    f_ru = _font(40, bold=True)
+    for line in _wrap(russian, f_ru, CW - PAD * 2)[:2]:
+        d.text((PAD, y), line, font=f_ru, fill=(15, 25, 50))
+        y += _th(f_ru) + 6
+    y += 18
 
-    by = y + 14
+    _separator(d, y)
+    y += 30
 
-    # V2
-    d.text((PAD + 4, by), "PAST SIMPLE", font=f_label, fill=_hex("#B0C0D0"))
-    by += 16
-    d.text((PAD + 4, by), past_simple or "—", font=f_form, fill=_hex("#D97A2A"))
-    by += 40
+    # Example
+    if example:
+        _example_block(d, example, english, accent, y)
 
-    # V3
-    d.text((PAD + 4, by), "PAST PARTICIPLE", font=f_label, fill=_hex("#B0C0D0"))
-    by += 16
-    d.text((PAD + 4, by), past_participle or "—", font=f_form, fill=_hex("#3A9A5C"))
+    return _to_bytes(img)
 
-    buf = io.BytesIO()
-    img.save(buf, format="PNG", optimize=True)
-    buf.seek(0)
-    return buf
+
+# ── Public: Irregular verb card ────────────────────────────────────────────────
+
+def render_verb_card(infinitive: str, russian: str,
+                     past_simple: str = "",
+                     past_participle: str = "",
+                     number: str = "—",
+                     accent: str = "#D97A2A",
+                     example: str = "") -> io.BytesIO:
+
+    img, d = _make_card()
+    r, g, b = _hex(accent)
+
+    _accent_stripe(d, accent)
+
+    y = 24
+    _label_row(d, "IRREGULAR VERB", number, accent, y)
+    y += 72
+
+    # Three form boxes
+    forms = [
+        (infinitive,               "INFINITIVE",       False),
+        (past_simple or "—",       "PAST SIMPLE",      True),
+        (past_participle or "—",   "PAST PARTICIPLE",  False),
+    ]
+    col_gap = 16
+    col_w   = (CW - PAD * 2 - col_gap * 2) // 3
+    box_h   = 140
+    f_form  = _font(42, bold=True)
+    f_lbl   = _font(17, bold=True)
+
+    for i, (form, lbl, is_accent) in enumerate(forms):
+        cx = PAD + i * (col_w + col_gap)
+        box_fill = _tint(accent, 0.10) if is_accent else (248, 249, 252)
+        d.rounded_rectangle([cx, y, cx + col_w, y + box_h],
+                             radius=18, fill=box_fill)
+        fw = _tw(form, f_form)
+        fc = (r, g, b) if is_accent else (10, 15, 30)
+        d.text((cx + (col_w - fw) // 2, y + 26), form, font=f_form, fill=fc)
+        lw = _tw(lbl, f_lbl)
+        d.text((cx + (col_w - lw) // 2, y + 96), lbl,
+               font=f_lbl, fill=(160, 170, 185))
+
+    y += box_h + 24
+
+    # Dots connector
+    centres = [PAD + i * (col_w + col_gap) + col_w // 2 for i in range(3)]
+    for i, cx in enumerate(centres):
+        d.ellipse([cx - 7, y - 7, cx + 7, y + 7], fill=(r, g, b))
+        if i < 2:
+            nx = centres[i + 1] - 7
+            d.rectangle([cx + 8, y - 1, nx, y + 1], fill=LINE_CLR)
+    y += 32
+
+    _separator(d, y)
+    y += 30
+
+    # Translation
+    f_ru_lbl = _font(18, bold=True)
+    d.text((PAD, y), "ПЕРЕВОД", font=f_ru_lbl, fill=_tint(accent, 0.55))
+    y += 28
+
+    f_ru = _font(36, bold=True)
+    for line in _wrap(russian, f_ru, CW - PAD * 2)[:2]:
+        d.text((PAD, y), line, font=f_ru, fill=(15, 25, 50))
+        y += _th(f_ru) + 6
+    y += 18
+
+    _separator(d, y)
+    y += 30
+
+    # Example
+    hl = past_simple or infinitive
+    if example:
+        _example_block(d, example, hl, accent, y)
+
+    return _to_bytes(img)

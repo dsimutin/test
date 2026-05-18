@@ -195,9 +195,12 @@ async def _send_card(update: Update, context: ContextTypes.DEFAULT_TYPE, edit: b
     })
 
     if mode == "word":
-        image = render_word_card(english, russian, transcription or "", example or "")
+        image = render_word_card(english, russian,
+                                 transcription or "", example or "")
     else:
-        image = render_verb_card(english, russian, past_simple or "", past_participle or "")
+        image = render_verb_card(english, russian,
+                                 past_simple or "", past_participle or "",
+                                 example=example or "")
 
     kb = _card_keyboard()
     if edit:
