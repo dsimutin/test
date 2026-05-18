@@ -3,12 +3,20 @@ import os
 import random
 
 from dotenv import load_dotenv
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    Update,
+)
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
+    MessageHandler,
+    filters,
 )
 
 from database import (
@@ -29,6 +37,15 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 LINE = "──────────────────"
+
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("📖 Учить слова"), KeyboardButton("⚡ Учить глаголы")],
+        [KeyboardButton("📊 Статистика"),  KeyboardButton("🔄 Синхронизировать")],
+    ],
+    resize_keyboard=True,
+    is_persistent=True,
+)
 
 
 # ── card text builders ────────────────────────────────────────────────────────
@@ -225,21 +242,32 @@ async def _send_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привет! Я помогу тебе учить английские слова.\n\n"
-        "Команды:\n"
-        "/study — начать повторение карточек\n"
-        "/stats — твоя статистика\n"
-        "/sync — загрузить слова из Google Sheets"
+        "Выбери раздел в меню внизу 👇",
+        reply_markup=MAIN_MENU,
     )
 
 
-async def cmd_study(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_study(update: Update, context: ContextTypes.DEFAULT_TYPE, mode: str = None):
     user_id = update.effective_user.id
     counts = get_card_counts(user_id)
 
     if not counts:
         await update.message.reply_text(
-            "📭 Карточек пока нет. Загрузи слова командой /sync"
+            "📭 Карточек пока нет. Нажми «🔄 Синхронизировать»",
+            reply_markup=MAIN_MENU,
         )
+        return
+
+    if mode:
+        if counts.get(mode):
+            context.user_data["mode"] = mode
+            await _send_card(update, context)
+        else:
+            label = "слова" if mode == "word" else "глаголы"
+            await update.message.reply_text(
+                f"🎉 Все {label} на сегодня повторены!\nВозвращайся завтра 👋",
+                reply_markup=MAIN_MENU,
+            )
         return
 
     if len(counts) == 1:
@@ -251,6 +279,18 @@ async def cmd_study(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Что будем учить сегодня?",
         reply_markup=_mode_keyboard(counts),
     )
+
+
+async def on_menu_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
+    if text == "📖 Учить слова":
+        await cmd_study(update, context, mode="word")
+    elif text == "⚡ Учить глаголы":
+        await cmd_study(update, context, mode="verb")
+    elif text == "📊 Статистика":
+        await cmd_stats(update, context)
+    elif text == "🔄 Синхронизировать":
+        await cmd_sync(update, context)
 
 
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -381,6 +421,7 @@ def main():
     app.add_handler(CommandHandler("study", cmd_study))
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("sync", cmd_sync))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_menu_button))
     app.add_handler(CallbackQueryHandler(on_button))
 
     logger.info("Bot started")
