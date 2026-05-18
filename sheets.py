@@ -20,12 +20,38 @@ def fetch_vocabulary() -> List[Tuple[str, str, Optional[str]]]:
     else:
         spreadsheet = client.open(sheet_name)
 
-    rows = spreadsheet.sheet1.get_all_values()
-
+    # Load from all sheets that contain vocabulary (skip utility sheets)
+    SKIP_SHEETS = {"Progress Tracker"}
     words = []
-    for row in rows[1:]:  # skip header row
-        if len(row) >= 2 and row[0].strip() and row[1].strip():
-            example = row[2].strip() if len(row) > 2 and row[2].strip() else None
-            words.append((row[0], row[1], example))
+    seen = set()
+
+    for worksheet in spreadsheet.worksheets():
+        if worksheet.title in SKIP_SHEETS:
+            continue
+        rows = worksheet.get_all_values()
+        if not rows:
+            continue
+
+        # Detect column layout from header row
+        header = [h.strip().lower() for h in rows[0]]
+        try:
+            eng_col = next(i for i, h in enumerate(header) if h in ("слово", "word", "english"))
+            rus_col = next(i for i, h in enumerate(header) if h in ("перевод", "translation", "russian"))
+        except StopIteration:
+            continue
+        ex_col = next(
+            (i for i, h in enumerate(header) if h in ("пример", "example")), None
+        )
+
+        for row in rows[1:]:
+            if len(row) <= max(eng_col, rus_col):
+                continue
+            english = row[eng_col].strip()
+            russian = row[rus_col].strip()
+            if not english or not russian or english in seen:
+                continue
+            example = row[ex_col].strip() if ex_col is not None and len(row) > ex_col else None
+            seen.add(english)
+            words.append((english, russian, example or None))
 
     return words
