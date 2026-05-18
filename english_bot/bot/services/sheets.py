@@ -27,10 +27,17 @@ VERBS_SHEET = "irregular_verbs"
 
 
 def _creds(cfg: Config) -> Credentials:
-    if cfg.google_credentials_json:
-        return Credentials.from_service_account_info(
-            json.loads(cfg.google_credentials_json), scopes=SCOPES,
-        )
+    raw = cfg.google_credentials_json
+    if raw:
+        raw = raw.strip()
+        # JSON pasted directly?
+        if raw.startswith("{"):
+            return Credentials.from_service_account_info(
+                json.loads(raw), scopes=SCOPES,
+            )
+        # Otherwise treat as a file path (legacy var)
+        if os.path.isfile(raw):
+            return Credentials.from_service_account_file(raw, scopes=SCOPES)
     if cfg.google_credentials_file:
         return Credentials.from_service_account_file(
             cfg.google_credentials_file, scopes=SCOPES,

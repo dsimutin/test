@@ -37,5 +37,8 @@ def load_config() -> Config:
         db_path=db_path,
         card_cache_dir=cache,
         google_credentials_file=os.getenv("GOOGLE_CREDENTIALS_FILE"),
-        google_credentials_json=os.getenv("GOOGLE_CREDENTIALS_JSON"),
+        google_credentials_json=(
+            os.getenv("GOOGLE_CREDENTIALS_JSON")
+            or os.getenv("GOOGLE_CREDENTIALS")  # legacy name
+        ),
     )
