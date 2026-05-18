@@ -27,7 +27,7 @@ async def cmd_myid(msg: types.Message) -> None:
 
 @router.message(Command("students"))
 async def cmd_students(msg: types.Message, cfg: Config) -> None:
-    if not cfg.is_teacher(msg.from_user.id):
+    if not cfg.is_teacher(msg.from_user.id, msg.from_user.username):
         await msg.answer("⛔ Команда только для преподавателя.")
         return
 
@@ -56,7 +56,7 @@ async def cmd_students(msg: types.Message, cfg: Config) -> None:
 
 @router.message(Command("student"))
 async def cmd_student(msg: types.Message, cfg: Config) -> None:
-    if not cfg.is_teacher(msg.from_user.id):
+    if not cfg.is_teacher(msg.from_user.id, msg.from_user.username):
         await msg.answer("⛔ Команда только для преподавателя.")
         return
 

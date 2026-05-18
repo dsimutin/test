@@ -19,6 +19,7 @@ class Config:
     google_credentials_file: str | None
     google_credentials_json: str | None
     teacher_ids: frozenset[int]
+    teacher_usernames: frozenset[str]  # lowercased, no '@'
 
     # Pedagogy
     vocab_batch_size: int = 10
@@ -26,8 +27,12 @@ class Config:
     quiz_questions_vocab: int = 10
     quiz_questions_verbs: int = 5
 
-    def is_teacher(self, telegram_id: int) -> bool:
-        return telegram_id in self.teacher_ids
+    def is_teacher(self, telegram_id: int, username: str | None = None) -> bool:
+        if telegram_id in self.teacher_ids:
+            return True
+        if username and username.lower().lstrip("@") in self.teacher_usernames:
+            return True
+        return False
 
 
 def load_config() -> Config:
@@ -40,6 +45,11 @@ def load_config() -> Config:
         int(x.strip()) for x in teachers_raw.split(",")
         if x.strip().isdigit()
     )
+    teacher_usernames = frozenset(
+        x.strip().lower().lstrip("@")
+        for x in os.getenv("TEACHER_USERNAMES", "").split(",")
+        if x.strip()
+    )
     return Config(
         bot_token=os.environ["BOT_TOKEN"],
         spreadsheet_id=os.environ["SPREADSHEET_ID"],
@@ -51,4 +61,5 @@ def load_config() -> Config:
             or os.getenv("GOOGLE_CREDENTIALS")  # legacy name
         ),
         teacher_ids=teacher_ids,
+        teacher_usernames=teacher_usernames,
     )
