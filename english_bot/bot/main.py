@@ -17,6 +17,7 @@ from .handlers import quiz as quiz_router
 from .handlers import start as start_router
 from .handlers import stats as stats_router
 from .handlers import sync as sync_router
+from .handlers import teacher as teacher_router
 from .handlers import verbs as verbs_router
 from .handlers import vocabulary as vocab_router
 from .services import card_renderer
@@ -49,6 +50,7 @@ async def main() -> None:
     dp["cfg"] = cfg
 
     dp.include_router(start_router.router)
+    dp.include_router(teacher_router.router)
     dp.include_router(sync_router.router)
     dp.include_router(stats_router.router)
     dp.include_router(vocab_router.router)

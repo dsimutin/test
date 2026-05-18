@@ -418,6 +418,100 @@ async def last_session_date(telegram_id: int) -> str | None:
 
 # ── stats counts ──────────────────────────────────────────────────────────
 
+async def list_all_students() -> list[dict]:
+    """Returns one row per known user with summary stats."""
+    async with connect() as conn:
+        cur = await conn.execute(
+            """SELECT u.telegram_id, u.username, u.first_name, u.created_at,
+                  (SELECT COUNT(*) FROM vocabulary_progress
+                       WHERE telegram_id=u.telegram_id AND status='known'),
+                  (SELECT COUNT(*) FROM vocabulary_progress
+                       WHERE telegram_id=u.telegram_id
+                         AND status IN ('repeat','learning')),
+                  (SELECT COUNT(*) FROM verb_progress
+                       WHERE telegram_id=u.telegram_id AND status='known'),
+                  (SELECT COUNT(*) FROM verb_progress
+                       WHERE telegram_id=u.telegram_id
+                         AND status IN ('repeat','learning')),
+                  (SELECT MAX(finished_at) FROM sessions
+                       WHERE telegram_id=u.telegram_id AND finished_at IS NOT NULL)
+               FROM users u
+               ORDER BY u.first_name COLLATE NOCASE"""
+        )
+        rows = await cur.fetchall()
+    return [
+        {
+            "telegram_id": r[0], "username": r[1], "first_name": r[2],
+            "created_at": r[3],
+            "words_known": r[4], "words_review": r[5],
+            "verbs_known": r[6], "verbs_review": r[7],
+            "last_session": r[8],
+        }
+        for r in rows
+    ]
+
+
+async def student_detail(telegram_id: int) -> dict | None:
+    """Detailed view: counts + recent sessions + worst-known items."""
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT username, first_name, created_at FROM users "
+            "WHERE telegram_id = ?", (telegram_id,)
+        )
+        user = await cur.fetchone()
+        if not user:
+            return None
+        cur = await conn.execute(
+            "SELECT mode, started_at, finished_at, total_items, "
+            "correct_answers, wrong_answers FROM sessions "
+            "WHERE telegram_id = ? ORDER BY id DESC LIMIT 5",
+            (telegram_id,),
+        )
+        sessions = await cur.fetchall()
+        cur = await conn.execute(
+            """SELECT v.word, v.translation, vp.wrong_count, vp.correct_count
+               FROM vocabulary_progress vp
+               JOIN vocabulary v ON v.id = vp.word_id
+               WHERE vp.telegram_id = ? AND vp.wrong_count > 0
+               ORDER BY vp.wrong_count DESC LIMIT 10""",
+            (telegram_id,),
+        )
+        worst_words = await cur.fetchall()
+        cur = await conn.execute(
+            """SELECT iv.infinitive, iv.translation,
+                      vp.wrong_count, vp.correct_count,
+                      vp.past_simple_errors, vp.past_participle_errors
+               FROM verb_progress vp
+               JOIN irregular_verbs iv ON iv.id = vp.verb_id
+               WHERE vp.telegram_id = ? AND vp.wrong_count > 0
+               ORDER BY vp.wrong_count DESC LIMIT 10""",
+            (telegram_id,),
+        )
+        worst_verbs = await cur.fetchall()
+    return {
+        "telegram_id": telegram_id,
+        "username": user[0],
+        "first_name": user[1],
+        "created_at": user[2],
+        "sessions": [
+            {"mode": s[0], "started_at": s[1], "finished_at": s[2],
+             "total": s[3], "correct": s[4], "wrong": s[5]}
+            for s in sessions
+        ],
+        "worst_words": [
+            {"word": w[0], "translation": w[1],
+             "wrong": w[2], "correct": w[3]}
+            for w in worst_words
+        ],
+        "worst_verbs": [
+            {"infinitive": v[0], "translation": v[1],
+             "wrong": v[2], "correct": v[3],
+             "ps_errors": v[4], "pp_errors": v[5]}
+            for v in worst_verbs
+        ],
+    }
+
+
 async def vocab_stats(telegram_id: int) -> dict:
     async with connect() as conn:
         cur = await conn.execute(
