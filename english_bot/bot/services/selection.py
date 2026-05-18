@@ -1,8 +1,17 @@
-"""Pick next N items by priority:
-  1. repeat
-  2. learning
-  3. new (no progress yet)
-  4. oldest last_seen_at
+"""Pick next N items per student. Two-step:
+
+1. Determine the candidate pool:
+   - If teacher set up multi-tenant mode (any rows in `_students`):
+     take only items explicitly assigned to this student.
+     If the student has no assignments at all → empty pool (teacher
+     hasn't added them yet).
+   - Otherwise (single-tenant fallback) — all active items.
+
+2. Order pool by priority:
+   1. repeat
+   2. learning
+   3. new
+   4. oldest last_seen_at
 """
 from __future__ import annotations
 
@@ -10,20 +19,32 @@ from ..storage import db
 
 
 async def pick_vocabulary_ids(telegram_id: int, n: int) -> list[str]:
+    pool = await _candidate_pool(telegram_id, "word")
     progress = await db.get_vocab_progress_map(telegram_id)
-    all_ids = await db.fetch_active_vocabulary_ids()
-    return _pick(all_ids, progress, n)
+    return _order_pool(pool, progress, n)
 
 
 async def pick_verb_ids(telegram_id: int, n: int) -> list[str]:
+    pool = await _candidate_pool(telegram_id, "verb")
     progress = await db.get_verb_progress_map(telegram_id)
-    all_ids = await db.fetch_active_verb_ids()
-    return _pick(all_ids, progress, n)
+    return _order_pool(pool, progress, n)
 
 
-def _pick(all_ids: list[str], progress: dict, n: int) -> list[str]:
+async def _candidate_pool(telegram_id: int, item_type: str) -> list[str]:
+    multi_tenant = await db.has_students_config()
+    if multi_tenant:
+        return await db.get_assigned_ids(telegram_id, item_type)
+    # single-tenant fallback
+    if item_type == "word":
+        return await db.fetch_active_vocabulary_ids()
+    return await db.fetch_active_verb_ids()
+
+
+def _order_pool(pool: list[str], progress: dict, n: int) -> list[str]:
+    if not pool:
+        return []
     repeat, learning, seen_old, new = [], [], [], []
-    for i in all_ids:
+    for i in pool:
         p = progress.get(i)
         if p is None:
             new.append(i)
@@ -33,11 +54,9 @@ def _pick(all_ids: list[str], progress: dict, n: int) -> list[str]:
             learning.append((p.last_seen_at or "", i))
         elif p.status == "known":
             seen_old.append((p.last_seen_at or "", i))
-
     repeat.sort()
     learning.sort()
     seen_old.sort()
-
     ordered = (
         [i for _, i in repeat]
         + [i for _, i in learning]

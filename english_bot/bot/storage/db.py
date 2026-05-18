@@ -95,6 +95,28 @@ CREATE INDEX IF NOT EXISTS idx_vocab_progress_user
     ON vocabulary_progress(telegram_id);
 CREATE INDEX IF NOT EXISTS idx_verb_progress_user
     ON verb_progress(telegram_id);
+
+-- Per-student content assignments. If a student has rows here, they see
+-- ONLY these items. If they have no rows AND the _students sheet is
+-- empty, they see all active content (default / single-tenant mode).
+CREATE TABLE IF NOT EXISTS student_assignments (
+    telegram_id INTEGER NOT NULL,
+    item_type   TEXT    NOT NULL,   -- 'word' | 'verb'
+    item_id     TEXT    NOT NULL,
+    PRIMARY KEY (telegram_id, item_type, item_id)
+);
+CREATE INDEX IF NOT EXISTS idx_assignments_user
+    ON student_assignments(telegram_id, item_type);
+
+-- Tiny mirror of the _students sheet (so selection logic can ask
+-- "is multi-tenant mode active?" without round-tripping to Google).
+CREATE TABLE IF NOT EXISTS students_config (
+    telegram_id     INTEGER PRIMARY KEY,
+    name            TEXT,
+    spreadsheet_id  TEXT,
+    active_lessons  TEXT,
+    updated_at      TEXT NOT NULL
+);
 """
 
 _DB_PATH: Path | None = None
@@ -510,6 +532,75 @@ async def student_detail(telegram_id: int) -> dict | None:
             for v in worst_verbs
         ],
     }
+
+
+# ── multi-tenant: students_config + student_assignments ──────────────────
+
+async def replace_students_config(rows: list[dict]) -> None:
+    """rows: [{telegram_id, name, spreadsheet_id, active_lessons}, ...]"""
+    from datetime import datetime
+    now = datetime.utcnow().isoformat()
+    async with connect() as conn:
+        await conn.execute("DELETE FROM students_config")
+        if rows:
+            await conn.executemany(
+                """INSERT INTO students_config
+                       (telegram_id, name, spreadsheet_id,
+                        active_lessons, updated_at)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [(r["telegram_id"], r.get("name") or "",
+                  r.get("spreadsheet_id") or "",
+                  r.get("active_lessons") or "*",
+                  now) for r in rows],
+            )
+        await conn.commit()
+
+
+async def list_students_config() -> list[dict]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT telegram_id, name, spreadsheet_id, active_lessons "
+            "FROM students_config"
+        )
+        return [
+            {"telegram_id": r[0], "name": r[1],
+             "spreadsheet_id": r[2], "active_lessons": r[3]}
+            for r in await cur.fetchall()
+        ]
+
+
+async def has_students_config() -> bool:
+    """True if teacher has set up multi-tenant mode (any _students rows)."""
+    async with connect() as conn:
+        cur = await conn.execute("SELECT 1 FROM students_config LIMIT 1")
+        return (await cur.fetchone()) is not None
+
+
+async def replace_student_assignments(telegram_id: int, item_type: str,
+                                       ids: list[str]) -> None:
+    async with connect() as conn:
+        await conn.execute(
+            "DELETE FROM student_assignments "
+            "WHERE telegram_id = ? AND item_type = ?",
+            (telegram_id, item_type),
+        )
+        if ids:
+            await conn.executemany(
+                "INSERT OR IGNORE INTO student_assignments "
+                "(telegram_id, item_type, item_id) VALUES (?, ?, ?)",
+                [(telegram_id, item_type, i) for i in ids],
+            )
+        await conn.commit()
+
+
+async def get_assigned_ids(telegram_id: int, item_type: str) -> list[str]:
+    async with connect() as conn:
+        cur = await conn.execute(
+            "SELECT item_id FROM student_assignments "
+            "WHERE telegram_id = ? AND item_type = ?",
+            (telegram_id, item_type),
+        )
+        return [r[0] for r in await cur.fetchall()]
 
 
 async def is_progress_empty() -> bool:

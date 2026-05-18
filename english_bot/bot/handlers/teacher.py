@@ -238,6 +238,38 @@ async def on_export(msg: types.Message, cfg: Config) -> None:
 
 # ── manual backup ─────────────────────────────────────────────────────────
 
+@router.message(Command("assignments"))
+async def cmd_assignments(msg: types.Message, cfg: Config) -> None:
+    """Show who's set up in _students and what's assigned."""
+    if not _is_teacher(msg, cfg):
+        await msg.answer("⛔ Команда только для преподавателя.")
+        return
+    rows = await db.list_students_config()
+    if not rows:
+        await msg.answer(
+            "Лист <code>_students</code> пуст — все ученики видят "
+            "слова из главной таблицы (single-tenant режим).\n\n"
+            "Чтобы дать персональные слова — добавь в "
+            "<code>_students</code>:\n"
+            "<code>telegram_id | name | spreadsheet_id | active_lessons</code>"
+        )
+        return
+    lines = ["📋 <b>Назначения учеников</b>\n"]
+    for r in rows:
+        word_ids = await db.get_assigned_ids(r["telegram_id"], "word")
+        verb_ids = await db.get_assigned_ids(r["telegram_id"], "verb")
+        src = r["spreadsheet_id"] or "<i>главная таблица</i>"
+        src_short = (src[:18] + "…") if len(src) > 20 else src
+        lines.append(
+            f"<b>{html.escape(r['name'] or '—')}</b>  "
+            f"<code>{r['telegram_id']}</code>\n"
+            f"  Источник: {src_short}\n"
+            f"  Уроки: <code>{html.escape(r['active_lessons'])}</code>\n"
+            f"  📚 {len(word_ids)} слов · ⚡ {len(verb_ids)} глаголов\n"
+        )
+    await msg.answer("\n".join(lines))
+
+
 @router.message(F.text == BTN_BACKUP)
 @router.message(Command("backup"))
 async def on_backup(msg: types.Message, cfg: Config) -> None:
