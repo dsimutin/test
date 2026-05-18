@@ -12,13 +12,14 @@ def fetch_vocabulary() -> List[Tuple[str, str, Optional[str]]]:
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
     sheet_name = os.environ.get("SHEET_NAME", "vocabulary")
 
-    # Accept credentials as JSON string (GOOGLE_CREDENTIALS_JSON),
-    # as a file path (GOOGLE_CREDENTIALS_FILE), or auto-detect if the
-    # file variable actually contains JSON content (common Railway mistake).
+    # Accept credentials from any of these env vars (Railway often uses GOOGLE_CREDENTIALS)
     raw = (
         os.environ.get("GOOGLE_CREDENTIALS_JSON")
+        or os.environ.get("GOOGLE_CREDENTIALS")
         or os.environ.get("GOOGLE_CREDENTIALS_FILE", "")
     )
+    if not raw:
+        raise ValueError("No Google credentials found. Set GOOGLE_CREDENTIALS env var to the service account JSON string.")
     if raw.strip().startswith("{"):
         creds = Credentials.from_service_account_info(json.loads(raw), scopes=SCOPES)
     else:
